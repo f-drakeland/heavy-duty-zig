@@ -39,8 +39,12 @@ Early development.
 
 Current input begins after physical-layer decoding and checksum handling.
 
-Passive J1587 diagnostic observation is supported. The library can decode
-structured PID 194 fault records, including multisection diagnostic tables.
+Passive J1587 diagnostic observation is supported. Logical J1587 parameters
+can be converted into typed observations for software identification, VIN,
+component identification, vehicle distance, and PID 194 diagnostic codes.
 
-Live J1708/J1939 transport, diagnostic correlation, active diagnostic
+PID 192 multisection parameters can be reassembled before observation
+decoding.
+
+Live J1708/J1939 transport, cross-observation correlation, active diagnostic
 requests, fault clearing, and programming operations are not implemented yet.

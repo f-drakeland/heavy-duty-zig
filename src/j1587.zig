@@ -1,27 +1,32 @@
 const std = @import("std");
 const parser = @import("j1587/parser.zig");
+const observations_module = @import("j1587/observations.zig");
 
+// PID constants
 pub const pid_multisection = parser.pid_multisection;
+pub const pid_diagnostic_code_table = parser.pid_diagnostic_code_table;
 pub const pid_software_identification = parser.pid_software_identification;
 pub const pid_vin = parser.pid_vin;
 pub const pid_component_identification = parser.pid_component_identification;
 pub const pid_total_vehicle_distance = parser.pid_total_vehicle_distance;
-pub const pid_diagnostic_code_table = parser.pid_diagnostic_code_table;
 
+// Core parser types
 pub const DecodeError = parser.DecodeError;
 pub const Message = parser.Message;
 pub const ComponentIdentification = parser.ComponentIdentification;
 pub const TotalVehicleDistance = parser.TotalVehicleDistance;
 
+// Core parser functions
 pub const parseMessage = parser.parseMessage;
 pub const decodeComponentData = parser.decodeComponentData;
 pub const decodeSoftwareData = parser.decodeSoftwareData;
 pub const decodeVinData = parser.decodeVinData;
-pub const decodeTotalVehicleDistanceData =
-    parser.decodeTotalVehicleDistanceData;
+pub const decodeTotalVehicleDistanceData = parser.decodeTotalVehicleDistanceData;
 
+// Multisection transport
 pub const multisection = @import("j1587/multisection.zig");
 
+// Diagnostics
 pub const diagnostics = @import("j1587/diagnostics.zig");
 
 pub const IdentifierKind = diagnostics.IdentifierKind;
@@ -31,10 +36,19 @@ pub const DiagnosticCodeIterator = diagnostics.DiagnosticCodeIterator;
 
 pub const diagnosticCodes = diagnostics.diagnosticCodes;
 
+// Observations
+pub const SoftwareIdentification = observations_module.SoftwareIdentification;
+pub const Vin = observations_module.Vin;
+pub const Observation = observations_module.Observation;
+pub const ObservationIterator = observations_module.ObservationIterator;
+
+pub const observations = observations_module.observations;
+
 test {
     _ = parser;
     _ = multisection;
     _ = diagnostics;
+    _ = observations_module;
 }
 
 test "parse J1587 PID 194 message into diagnostic code" {
