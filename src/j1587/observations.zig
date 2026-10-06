@@ -129,6 +129,19 @@ pub fn observations(
     };
 }
 
+pub fn supportsPid(pid: u8) bool {
+    return switch (pid) {
+        parser.pid_diagnostic_code_table,
+        parser.pid_software_identification,
+        parser.pid_vin,
+        parser.pid_component_identification,
+        parser.pid_total_vehicle_distance,
+        => true,
+
+        else => false,
+    };
+}
+
 test "observation types preserve source MID" {
     const observation = Observation{
         .software_identification = .{

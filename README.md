@@ -21,6 +21,10 @@ Initial support focuses on J1708/J1587:
 - FMI decoding
 - occurrence count handling
 - page-two identfier expansion
+- stateful J1587 message decoding
+- automatic PID 192 multisection handling
+- typed observation delivery from raw J1587 messages
+- explicit handling of unsupported valid parameters
 
 ## Design
 
@@ -39,12 +43,13 @@ Early development.
 
 Current input begins after physical-layer decoding and checksum handling.
 
-Passive J1587 diagnostic observation is supported. Logical J1587 parameters
-can be converted into typed observations for software identification, VIN,
-component identification, vehicle distance, and PID 194 diagnostic codes.
+Heavy Duty Zig can accept checksum-stripped J1587 messages, reassemble PID 192
+multisection parameters, and expose typed observations for software
+identification, VIN, component identification, vehicle distance, and PID 194
+diagnostic codes.
 
-PID 192 multisection parameters can be reassembled before observation
-decoding.
+Valid but unsupported J1587 parameters are reported separately from malformed
+input.
 
 Live J1708/J1939 transport, cross-observation correlation, active diagnostic
 requests, fault clearing, and programming operations are not implemented yet.

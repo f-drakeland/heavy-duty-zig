@@ -1,6 +1,7 @@
 const std = @import("std");
 const parser = @import("j1587/parser.zig");
 const observations_module = @import("j1587/observations.zig");
+const decoder_module = @import("j1587/decoder.zig");
 
 // PID constants
 pub const pid_multisection = parser.pid_multisection;
@@ -44,11 +45,17 @@ pub const ObservationIterator = observations_module.ObservationIterator;
 
 pub const observations = observations_module.observations;
 
+pub const Decoder = decoder_module.Decoder;
+pub const DecoderError = decoder_module.DecodeError;
+pub const PushResult = decoder_module.PushResult;
+pub const UnsupportedParameter = decoder_module.UnsupportedParameter;
+
 test {
     _ = parser;
     _ = multisection;
     _ = diagnostics;
     _ = observations_module;
+    _ = decoder_module;
 }
 
 test "parse J1587 PID 194 message into diagnostic code" {
