@@ -15,6 +15,12 @@ Initial support focuses on J1708/J1587:
 - PID 237 VIN
 - PID 243 component identification
 - PID 245 total vehicle distance
+- PID 194 diagnostic code table decoding
+- active/inactive fault status
+- PID/SID identifcation
+- FMI decoding
+- occurrence count handling
+- page-two identfier expansion
 
 ## Design
 
@@ -33,5 +39,8 @@ Early development.
 
 Current input begins after physical-layer decoding and checksum handling.
 
-Live J1708/J1939 transport, diagnostic correlation, and active vehicle
-operations are not implemented yet.
+Passive J1587 diagnostic observation is supported. The library can decode
+structured PID 194 fault records, including multisection diagnostic tables.
+
+Live J1708/J1939 transport, diagnostic correlation, active diagnostic
+requests, fault clearing, and programming operations are not implemented yet.

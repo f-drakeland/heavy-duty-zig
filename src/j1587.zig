@@ -1,3 +1,4 @@
+const std = @import("std");
 const parser = @import("j1587/parser.zig");
 
 pub const pid_multisection = parser.pid_multisection;
@@ -5,6 +6,7 @@ pub const pid_software_identification = parser.pid_software_identification;
 pub const pid_vin = parser.pid_vin;
 pub const pid_component_identification = parser.pid_component_identification;
 pub const pid_total_vehicle_distance = parser.pid_total_vehicle_distance;
+pub const pid_diagnostic_code_table = parser.pid_diagnostic_code_table;
 
 pub const DecodeError = parser.DecodeError;
 pub const Message = parser.Message;
@@ -20,7 +22,151 @@ pub const decodeTotalVehicleDistanceData =
 
 pub const multisection = @import("j1587/multisection.zig");
 
+pub const diagnostics = @import("j1587/diagnostics.zig");
+
+pub const IdentifierKind = diagnostics.IdentifierKind;
+pub const FaultStatus = diagnostics.FaultStatus;
+pub const DiagnosticCode = diagnostics.DiagnosticCode;
+pub const DiagnosticCodeIterator = diagnostics.DiagnosticCodeIterator;
+
+pub const diagnosticCodes = diagnostics.diagnosticCodes;
+
 test {
     _ = parser;
     _ = multisection;
+    _ = diagnostics;
+}
+
+test "parse J1587 PID 194 message into diagnostic code" {
+    const message =
+        "\x80\xc2\x02\x6e\x20";
+
+    const parsed =
+        try parseMessage(message);
+
+    try std.testing.expectEqual(
+        @as(u8, 128),
+        parsed.source_mid,
+    );
+
+    try std.testing.expectEqual(
+        pid_diagnostic_code_table,
+        parsed.pid,
+    );
+
+    var codes =
+        diagnosticCodes(
+            parsed.source_mid,
+            parsed.data,
+        );
+
+    const code =
+        (try codes.next()) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        IdentifierKind.pid,
+        code.identifier_kind,
+    );
+
+    try std.testing.expectEqual(
+        @as(u16, 110),
+        code.identifier,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        code.fmi,
+    );
+
+    try std.testing.expectEqual(
+        FaultStatus.active,
+        code.status,
+    );
+
+    try std.testing.expectEqual(
+        @as(?DiagnosticCode, null),
+        try codes.next(),
+    );
+}
+
+test "reassemble multisection PID 194 and decode diagnostic codes" {
+    const first =
+        "\x80\xc0\x06\xc2\x10\x05\x6e\x20\x6c";
+
+    const second =
+        "\x80\xc0\x04\xc2\x11\xa8\x01";
+
+    var bank = multisection.Bank.init();
+
+    try std.testing.expectEqual(
+        multisection.PushResult.pending,
+        try bank.push(first),
+    );
+
+    const result = try bank.push(second);
+
+    switch (result) {
+        .pending => return error.TestUnexpectedResult,
+
+        .complete => |parameter| {
+            try std.testing.expectEqual(
+                pid_diagnostic_code_table,
+                parameter.pid,
+            );
+
+            var codes = diagnosticCodes(
+                parameter.source_mid,
+                parameter.data,
+            );
+
+            const first_code =
+                (try codes.next()) orelse
+                return error.TestUnexpectedResult;
+
+            try std.testing.expectEqual(
+                IdentifierKind.pid,
+                first_code.identifier_kind,
+            );
+
+            try std.testing.expectEqual(
+                @as(u16, 110),
+                first_code.identifier,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                first_code.fmi,
+            );
+
+            const second_code =
+                (try codes.next()) orelse
+                return error.TestUnexpectedResult;
+
+            try std.testing.expectEqual(
+                IdentifierKind.pid,
+                second_code.identifier_kind,
+            );
+
+            try std.testing.expectEqual(
+                @as(u16, 108),
+                second_code.identifier,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 8),
+                second_code.fmi,
+            );
+
+            try std.testing.expectEqual(
+                @as(?u8, 1),
+                second_code.occurrence_count,
+            );
+
+            try std.testing.expectEqual(
+                @as(?DiagnosticCode, null),
+                try codes.next(),
+            );
+        },
+    }
 }

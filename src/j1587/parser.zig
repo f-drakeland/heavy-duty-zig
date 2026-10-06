@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const pid_multisection: u8 = 192;
+pub const pid_diagnostic_code_table: u8 = 194;
 pub const pid_software_identification: u8 = 234;
 pub const pid_vin: u8 = 237;
 pub const pid_component_identification: u8 = 243;
