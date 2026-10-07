@@ -62,7 +62,21 @@ pub const Bank = struct {
         self: *Bank,
         raw_message: []const u8,
     ) ReassemblyError!PushResult {
-        const section = try parseSection(raw_message);
+        const message = try j1587.parseMessage(raw_message);
+
+        if (message.pid != j1587.pid_multisection) {
+            return error.NotMultisection;
+        }
+
+        return self.pushData(message.source_mid, message.data);
+    }
+
+    pub fn pushData(
+        self: *Bank,
+        source_mid: u8,
+        data: []const u8,
+    ) ReassemblyError!PushResult {
+        const section = try parseSectionData(source_mid, data);
 
         if (section.current_section == 0) {
             if (section.last_section == 0) {
@@ -160,12 +174,22 @@ fn parseSection(
         return error.NotMultisection;
     }
 
-    if (message.data.len < 2) {
+    return parseSectionData(
+        message.source_mid,
+        message.data,
+    );
+}
+
+fn parseSectionData(
+    source_mid: u8,
+    data: []const u8,
+) ReassemblyError!Section {
+    if (data.len < 2) {
         return error.InvalidSection;
     }
 
-    const target_pid = message.data[0];
-    const section_info = message.data[1];
+    const target_pid = data[0];
+    const section_info = data[1];
 
     const last_section = section_info >> 4;
     const current_section = section_info & 0x0f;
@@ -175,31 +199,31 @@ fn parseSection(
     }
 
     if (current_section == 0) {
-        if (message.data.len < 4) {
+        if (data.len < 4) {
             return error.InvalidSection;
         }
 
         return .{
-            .source_mid = message.source_mid,
+            .source_mid = source_mid,
             .target_pid = target_pid,
             .last_section = last_section,
             .current_section = current_section,
-            .total_length = message.data[2],
-            .segment = message.data[3..],
+            .total_length = data[2],
+            .segment = data[3..],
         };
     }
 
-    if (message.data.len < 3) {
+    if (data.len < 3) {
         return error.InvalidSection;
     }
 
     return .{
-        .source_mid = message.source_mid,
+        .source_mid = source_mid,
         .target_pid = target_pid,
         .last_section = last_section,
         .current_section = current_section,
         .total_length = null,
-        .segment = message.data[2..],
+        .segment = data[2..],
     };
 }
 

@@ -2,6 +2,9 @@ const std = @import("std");
 const parser = @import("j1587/parser.zig");
 const observations_module = @import("j1587/observations.zig");
 const decoder_module = @import("j1587/decoder.zig");
+pub const structure = @import("j1587/structure.zig");
+pub const parameters = @import("j1587/parameters.zig");
+pub const frame_cursor = @import("j1587/frame_cursor.zig");
 
 // PID constants
 pub const pid_multisection = parser.pid_multisection;
@@ -56,6 +59,9 @@ test {
     _ = diagnostics;
     _ = observations_module;
     _ = decoder_module;
+    _ = structure;
+    _ = parameters;
+    _ = frame_cursor;
 }
 
 test "parse J1587 PID 194 message into diagnostic code" {
