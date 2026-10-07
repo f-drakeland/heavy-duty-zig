@@ -70,9 +70,11 @@ pub const FrameCursor = struct {
 };
 
 test "cursor exposes observations and unsupported parameters in frame order" {
+    const unsupported_pid_before: u8 = 83;
+    const unsupported_pid_after: u8 = 89;
     const raw = [_]u8{
         128,
-        84,
+        unsupported_pid_before,
         1,
         234,
         6,
@@ -82,9 +84,9 @@ test "cursor exposes observations and unsupported parameters in frame order" {
         '2',
         '.',
         '1',
-        91,
+        unsupported_pid_after,
         2,
-        118,
+        121,
     };
 
     const frame =
@@ -102,7 +104,7 @@ test "cursor exposes observations and unsupported parameters in frame order" {
     switch (first) {
         .unsupported_parameter => |unsupported| {
             try std.testing.expectEqual(
-                @as(u16, 84),
+                @as(u16, unsupported_pid_before),
                 unsupported.pid,
             );
         },
@@ -132,7 +134,7 @@ test "cursor exposes observations and unsupported parameters in frame order" {
     switch (third) {
         .unsupported_parameter => |unsupported| {
             try std.testing.expectEqual(
-                @as(u16, 91),
+                @as(u16, unsupported_pid_after),
                 unsupported.pid,
             );
         },

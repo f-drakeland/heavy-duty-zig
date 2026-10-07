@@ -145,6 +145,55 @@ pub fn main(init: std.process.Init) !void {
                                         );
                                     },
 
+                                    .road_speed => |speed| {
+                                        try stdout.print(
+                                            "line {d}: road speed MID {d}, raw {d}, {d:.2} km/h, {d:.2} mph\n",
+                                            .{
+                                                event_entry.line_number,
+                                                speed.source_mid,
+                                                speed.raw_count,
+                                                speed.kilometers_per_hour,
+                                                speed.miles_per_hour,
+                                            },
+                                        );
+                                    },
+
+                                    .accelerator_pedal_position => |position| {
+                                        try stdout.print(
+                                            "line {d}: accelerator pedal MID {d}, raw {d}, {d:.2}%\n",
+                                            .{
+                                                event_entry.line_number,
+                                                position.source_mid,
+                                                position.raw_count,
+                                                position.percent,
+                                            },
+                                        );
+                                    },
+
+                                    .engine_load => |load| {
+                                        try stdout.print(
+                                            "line {d}: engine load MID {d}, raw {d}, {d:.2}%\n",
+                                            .{
+                                                event_entry.line_number,
+                                                load.source_mid,
+                                                load.raw_count,
+                                                load.percent,
+                                            },
+                                        );
+                                    },
+
+                                    .engine_speed => |speed| {
+                                        try stdout.print(
+                                            "line {d}: engine speed MID {d}, raw {d}, {d:.2} rpm\n",
+                                            .{
+                                                event_entry.line_number,
+                                                speed.source_mid,
+                                                speed.raw_count,
+                                                speed.rpm,
+                                            },
+                                        );
+                                    },
+
                                     .vehicle_distance => |distance| {
                                         try stdout.print(
                                             "line {d}: vehicle distance MID {d}, raw {d}, {d:.2} km, {d:.2} mi\n",

@@ -17,6 +17,12 @@ pub const Observation = union(enum) {
     vin: Vin,
     component_identification: parser.ComponentIdentification,
     vehicle_distance: parser.TotalVehicleDistance,
+
+    road_speed: parser.RoadSpeed,
+    accelerator_pedal_position: parser.AcceleratorPedalPosition,
+    engine_load: parser.EngineLoad,
+    engine_speed: parser.EngineSpeed,
+
     diagnostic_code: diagnostics.DiagnosticCode,
 };
 
@@ -58,6 +64,59 @@ pub const ObservationIterator = struct {
         }
 
         switch (self.pid) {
+            parser.pid_road_speed => {
+                const speed = try parser.decodeRoadSpeedData(
+                    self.source_mid,
+                    self.data,
+                );
+
+                self.emitted = true;
+
+                return .{
+                    .road_speed = speed,
+                };
+            },
+
+            parser.pid_accelerator_pedal_position => {
+                const position =
+                    try parser.decodeAcceleratorPedalPositionData(
+                        self.source_mid,
+                        self.data,
+                    );
+
+                self.emitted = true;
+
+                return .{
+                    .accelerator_pedal_position = position,
+                };
+            },
+
+            parser.pid_engine_load => {
+                const load = try parser.decodeEngineLoadData(
+                    self.source_mid,
+                    self.data,
+                );
+
+                self.emitted = true;
+
+                return .{
+                    .engine_load = load,
+                };
+            },
+
+            parser.pid_engine_speed => {
+                const speed = try parser.decodeEngineSpeedData(
+                    self.source_mid,
+                    self.data,
+                );
+
+                self.emitted = true;
+
+                return .{
+                    .engine_speed = speed,
+                };
+            },
+
             parser.pid_software_identification => {
                 self.emitted = true;
 
@@ -131,6 +190,10 @@ pub fn observations(
 
 pub fn supportsPid(pid: u8) bool {
     return switch (pid) {
+        parser.pid_road_speed,
+        parser.pid_accelerator_pedal_position,
+        parser.pid_engine_load,
+        parser.pid_engine_speed,
         parser.pid_diagnostic_code_table,
         parser.pid_software_identification,
         parser.pid_vin,
@@ -396,6 +459,163 @@ test "empty PID 194 produces no observations" {
         parser.pid_diagnostic_code_table,
         "",
     );
+
+    try std.testing.expectEqual(
+        @as(?Observation, null),
+        try iterator.next(),
+    );
+}
+
+test "PID 84 produces road speed observation" {
+    var iterator = observations(
+        128,
+        parser.pid_road_speed,
+        &[_]u8{100},
+    );
+
+    const observation =
+        (try iterator.next()) orelse
+        return error.TestUnexpectedResult;
+
+    switch (observation) {
+        .road_speed => |speed| {
+            try std.testing.expectEqual(
+                @as(u8, 128),
+                speed.source_mid,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 100),
+                speed.raw_count,
+            );
+
+            try std.testing.expectEqual(
+                @as(f64, 80.5),
+                speed.kilometers_per_hour,
+            );
+
+            try std.testing.expectEqual(
+                @as(f64, 50.0),
+                speed.miles_per_hour,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(
+        @as(?Observation, null),
+        try iterator.next(),
+    );
+}
+
+test "PID 91 produces accelerator pedal position observation" {
+    var iterator = observations(
+        128,
+        parser.pid_accelerator_pedal_position,
+        &[_]u8{125},
+    );
+
+    const observation =
+        (try iterator.next()) orelse
+        return error.TestUnexpectedResult;
+
+    switch (observation) {
+        .accelerator_pedal_position => |position| {
+            try std.testing.expectEqual(
+                @as(u8, 128),
+                position.source_mid,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 125),
+                position.raw_count,
+            );
+
+            try std.testing.expectEqual(
+                @as(f64, 50.0),
+                position.percent,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(
+        @as(?Observation, null),
+        try iterator.next(),
+    );
+}
+
+test "PID 92 produces engine load observation" {
+    var iterator = observations(
+        128,
+        parser.pid_engine_load,
+        &[_]u8{100},
+    );
+
+    const observation =
+        (try iterator.next()) orelse
+        return error.TestUnexpectedResult;
+
+    switch (observation) {
+        .engine_load => |load| {
+            try std.testing.expectEqual(
+                @as(u8, 128),
+                load.source_mid,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 100),
+                load.raw_count,
+            );
+
+            try std.testing.expectEqual(
+                @as(f64, 50.0),
+                load.percent,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(
+        @as(?Observation, null),
+        try iterator.next(),
+    );
+}
+
+test "PID 190 produces engine speed observation" {
+    var iterator = observations(
+        128,
+        parser.pid_engine_speed,
+        &[_]u8{ 0xa0, 0x0f },
+    );
+
+    const observation =
+        (try iterator.next()) orelse
+        return error.TestUnexpectedResult;
+
+    switch (observation) {
+        .engine_speed => |speed| {
+            try std.testing.expectEqual(
+                @as(u8, 128),
+                speed.source_mid,
+            );
+
+            try std.testing.expectEqual(
+                @as(u16, 4000),
+                speed.raw_count,
+            );
+
+            try std.testing.expectEqual(
+                @as(f64, 1000.0),
+                speed.rpm,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
 
     try std.testing.expectEqual(
         @as(?Observation, null),

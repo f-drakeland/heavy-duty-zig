@@ -107,16 +107,24 @@ interpretation.
 
 ## Typed J1587 observations
 
-The authentic capture produced nine typed observations through the full HDZ
+The authentic capture produced 565 typed observations through the full HDZ
 pipeline:
 
 ```text
+139 road_speed
+139 accelerator_pedal_position
+139 engine_load
+139 engine_speed
 6 vehicle_distance
 2 diagnostic_code
 1 component_identification
 ```
 
-The observation-bearing logger records were:
+The four operating-state parameters each appeared 139 times throughout the
+capture. Because those observations are repeated across many logger records,
+their individual line numbers are not enumerated here.
+
+The lower-frequency observation-bearing logger records were:
 
 ```text
 line 25:  component_identification
@@ -132,8 +140,9 @@ line 290: diagnostic_code
 line 308: diagnostic_code
 ```
 
-This demonstrates that authentic logger text can currently reach typed protocol
-observations without using synthetic pseudo-message input.
+This demonstrates that authentic logger text can reach typed identity,
+operating-state, cumulative-distance, and diagnostic observations without using
+synthetic pseudo-message input.
 
 ### Decoded observation contents
 
@@ -153,6 +162,35 @@ serial:        "<redacted-serial>"
 These strings are recorded as decoded protocol fields only. This validation does
 not independently identify the physical component or expand `"CMMNS"` into a
 manufacturer name.
+
+The four operating-state observation types each appeared 139 times. Every
+decoded observation in this capture came from source MID 128 and reported a raw
+value of zero:
+
+```text
+road speed:
+    raw count:        0
+    kilometers/hour:  0.00
+    miles/hour:       0.00
+
+accelerator pedal position:
+    raw count: 0
+    percent:   0.00
+
+engine load:
+    raw count: 0
+    percent:   0.00
+
+engine speed:
+    raw count: 0
+    rpm:       0.00
+```
+
+Taken together, these observations establish that the vehicle reported zero road
+speed, zero engine rotation, zero accelerator-pedal position, and zero engine
+load during all 139 observed samples. This is consistent with a stationary
+vehicle with no engine rotation and no accelerator input, but it does not
+establish the ignition or key state.
 
 The six vehicle-distance observations were identical:
 
@@ -198,44 +236,39 @@ diagnostic evidence from them.
 
 ## Unsupported J1587 parameters
 
-The capture also produced a large amount of valid but currently unsupported
-J1587 parameter evidence.
+After adding typed support for PIDs 84, 91, 92, and 190, the capture still
+produced 517 valid but currently unsupported J1587 parameter occurrences.
 
-The most common unsupported PIDs were:
+The remaining unsupported PIDs were:
 
 ```text
-139 × PID 84
-139 × PID 91
-139 × PID 92
-139 × PID 190
+68 × PID 85
+68 × PID 121
+68 × PID 183
+68 × PID 184
 
- 68 × PID 85
- 68 × PID 121
- 68 × PID 183
- 68 × PID 184
+45 × PID 128
+27 × PID 168
 
- 45 × PID 128
- 27 × PID 168
+15 × PID 83
+15 × PID 89
+15 × PID 100
+15 × PID 102
 
- 15 × PID 83
- 15 × PID 89
- 15 × PID 100
- 15 × PID 102
+14 × PID 65
+14 × PID 70
+14 × PID 71
+14 × PID 108
+14 × PID 110
 
- 14 × PID 65
- 14 × PID 70
- 14 × PID 71
- 14 × PID 108
- 14 × PID 110
+13 × PID 105
+13 × PID 175
 
- 13 × PID 105
- 13 × PID 175
+ 7 × PID 86
+ 7 × PID 87
 
-  7 × PID 86
-  7 × PID 87
-
-  2 × PID 0
-  1 × PID 74
+ 2 × PID 0
+ 1 × PID 74
 ```
 
 These parameters were not treated as malformed merely because HDZ does not yet

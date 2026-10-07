@@ -416,9 +416,11 @@ test "page-two parameter is valid but unsupported" {
 test "decoder consumes multiple parameters from one J1708 frame" {
     const j1708 = @import("../j1708.zig");
 
+    const unsupported_pid_before: u8 = 83;
+    const unsupported_pid_after: u8 = 89;
     const raw = [_]u8{
         128,
-        84,
+        unsupported_pid_before,
         1,
         234,
         6,
@@ -428,9 +430,9 @@ test "decoder consumes multiple parameters from one J1708 frame" {
         '2',
         '.',
         '1',
-        91,
+        unsupported_pid_after,
         2,
-        118,
+        121,
     };
 
     const frame = try j1708.FrameView.fromDelimited(&raw);
@@ -442,7 +444,7 @@ test "decoder consumes multiple parameters from one J1708 frame" {
 
     switch (first_result) {
         .unsupported => |unsupported| {
-            try std.testing.expectEqual(@as(u16, 84), unsupported.pid);
+            try std.testing.expectEqual(@as(u16, unsupported_pid_before), unsupported.pid);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -471,7 +473,7 @@ test "decoder consumes multiple parameters from one J1708 frame" {
 
     switch (third_result) {
         .unsupported => |unsupported| {
-            try std.testing.expectEqual(@as(u16, 91), unsupported.pid);
+            try std.testing.expectEqual(@as(u16, unsupported_pid_after), unsupported.pid);
         },
         else => return error.TestUnexpectedResult,
     }

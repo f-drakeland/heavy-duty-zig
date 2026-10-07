@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub const pid_road_speed: u8 = 84;
+pub const pid_accelerator_pedal_position: u8 = 91;
+pub const pid_engine_load: u8 = 92;
+pub const pid_engine_speed: u8 = 190;
 pub const pid_multisection: u8 = 192;
 pub const pid_diagnostic_code_table: u8 = 194;
 pub const pid_software_identification: u8 = 234;
@@ -99,6 +103,107 @@ pub fn decodeVinData(data: []const u8) DecodeError![]const u8 {
     }
 
     return vin;
+}
+
+pub const RoadSpeed = struct {
+    source_mid: u8,
+    raw_count: u8,
+    kilometers_per_hour: f64,
+    miles_per_hour: f64,
+};
+
+pub fn decodeRoadSpeedData(
+    source_mid: u8,
+    data: []const u8,
+) DecodeError!RoadSpeed {
+    if (data.len != 1) {
+        return error.InvalidLength;
+    }
+
+    const raw = data[0];
+    const raw_f: f64 = @floatFromInt(raw);
+
+    return .{
+        .source_mid = source_mid,
+        .raw_count = raw,
+        .kilometers_per_hour = raw_f * 0.805,
+        .miles_per_hour = raw_f * 0.5,
+    };
+}
+
+pub const AcceleratorPedalPosition = struct {
+    source_mid: u8,
+    raw_count: u8,
+    percent: f64,
+};
+
+pub fn decodeAcceleratorPedalPositionData(
+    source_mid: u8,
+    data: []const u8,
+) DecodeError!AcceleratorPedalPosition {
+    if (data.len != 1) {
+        return error.InvalidLength;
+    }
+
+    const raw = data[0];
+    const raw_f: f64 = @floatFromInt(raw);
+
+    return .{
+        .source_mid = source_mid,
+        .raw_count = raw,
+        .percent = raw_f * 0.4,
+    };
+}
+
+pub const EngineLoad = struct {
+    source_mid: u8,
+    raw_count: u8,
+    percent: f64,
+};
+
+pub fn decodeEngineLoadData(
+    source_mid: u8,
+    data: []const u8,
+) DecodeError!EngineLoad {
+    if (data.len != 1) {
+        return error.InvalidLength;
+    }
+
+    const raw = data[0];
+    const raw_f: f64 = @floatFromInt(raw);
+
+    return .{
+        .source_mid = source_mid,
+        .raw_count = raw,
+        .percent = raw_f * 0.5,
+    };
+}
+
+pub const EngineSpeed = struct {
+    source_mid: u8,
+    raw_count: u16,
+    rpm: f64,
+};
+
+pub fn decodeEngineSpeedData(
+    source_mid: u8,
+    data: []const u8,
+) DecodeError!EngineSpeed {
+    if (data.len != 2) {
+        return error.InvalidLength;
+    }
+
+    const raw: u16 =
+        @as(u16, data[0]) |
+        (@as(u16, data[1]) << 8);
+
+    const raw_f: f64 = @floatFromInt(raw);
+
+    return .{
+        .source_mid = source_mid,
+        .raw_count = raw,
+        .rpm = raw_f * 0.25,
+    };
 }
 
 pub const TotalVehicleDistance = struct {
@@ -208,5 +313,98 @@ test "decode PID 245 total vehicle distance" {
         @as(f64, 36.225),
         distance.kilometers,
         0.0001,
+    );
+}
+
+test "decode PID 84 road speed" {
+    const speed = try decodeRoadSpeedData(
+        128,
+        &[_]u8{100},
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 128),
+        speed.source_mid,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 100),
+        speed.raw_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(f64, 80.5),
+        speed.kilometers_per_hour,
+    );
+
+    try std.testing.expectEqual(
+        @as(f64, 50.0),
+        speed.miles_per_hour,
+    );
+}
+
+test "decode PID 91 accelerator pedal position" {
+    const position = try decodeAcceleratorPedalPositionData(
+        128,
+        &[_]u8{125},
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 128),
+        position.source_mid,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 125),
+        position.raw_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(f64, 50.0),
+        position.percent,
+    );
+}
+
+test "decode PID 92 engine load" {
+    const load = try decodeEngineLoadData(
+        128,
+        &[_]u8{100},
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 128),
+        load.source_mid,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 100),
+        load.raw_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(f64, 50.0),
+        load.percent,
+    );
+}
+
+test "decode PID 190 engine speed" {
+    const speed = try decodeEngineSpeedData(
+        128,
+        &[_]u8{ 0xa0, 0x0f },
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 128),
+        speed.source_mid,
+    );
+
+    try std.testing.expectEqual(
+        @as(u16, 4000),
+        speed.raw_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(f64, 1000.0),
+        speed.rpm,
     );
 }
