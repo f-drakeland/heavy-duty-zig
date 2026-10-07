@@ -459,6 +459,17 @@ As of this update:
   hiding internal pending bookkeeping;
 - a shared decoder preserves PID 192 multisection state across separate J1708
   frames;
+- `capture_text` converts logger text into caller-owned record bytes without
+  claiming those records are already J1708 frame boundaries;
+- malformed capture lines are preserved as rejected audit entries instead of
+  aborting the remainder of the file;
+- `CaptureCursor` fully drains a recovered record before allowing capture byte
+  storage to be reused for the next record;
+- recovered J1708 frames that are not J1587 are preserved as caller-visible
+  evidence rather than treated as capture failures;
+- the complete file-backed pipeline has been validated against 308 authentic
+  logger records; detailed empirical results are recorded in
+  `docs/AUTHENTIC_CAPTURE_VALIDATION.md`;
 - package tests are green at this checkpoint.
 
 ---
@@ -518,6 +529,130 @@ Decoder.pushParameter()
 
 Physical J1708 frame boundaries therefore do not interrupt logical J1587
 multisection decoding.
+
+---
+
+## AD-015 — Capture records are transport evidence, not J1708 frame claims
+
+**Status:** Accepted
+
+### Decision
+
+`capture_text` is responsible for converting supported logger text into raw record
+bytes and preserving source-line identity.
+
+A parsed capture record is not automatically a `j1708.FrameView`.
+
+### Why
+
+Authentic logger records may contain:
+
+- one physical J1708 frame;
+- multiple concatenated J1708 frames;
+- byte sequences whose original physical boundaries cannot be reconstructed
+  uniquely after the logger discards bus idle timing.
+
+The capture adapter therefore reports what the logger retained and leaves frame
+recovery to the recovery layer.
+
+### Storage consequence
+
+Capture parsing uses caller-provided byte storage. Parsed record bytes borrow that
+storage rather than allocating implicitly.
+
+---
+
+## AD-016 — Capture processing preserves rejected, ambiguous, and unrecoverable evidence
+
+**Status:** Accepted
+
+### Decision
+
+Whole-file processing does not collapse all non-decoded input into a single
+failure state.
+
+Capture audit distinguishes at least:
+
+- `rejected` — the logger line could not be converted into byte data;
+- `unrecoverable` — bytes were obtained but no complete valid frame
+  interpretation survived;
+- `ambiguous` — multiple complete interpretations survived;
+- `recovered` — exactly one complete interpretation survived.
+
+A malformed line does not abort processing of later lines.
+
+### Why
+
+These statuses describe materially different evidence. Preserving the distinction
+makes later debugging and provenance review possible and prevents coverage metrics
+from hiding uncertainty.
+
+---
+
+## AD-017 — Whole-capture orchestration drains each record before reusing byte storage
+
+**Status:** Accepted
+
+### Decision
+
+`CaptureCursor` must completely drain the current recovered record before asking
+`EntryIterator` for the next record.
+
+The shared stateful J1587 decoder may survive across records, but borrowed capture
+bytes may not.
+
+### Why
+
+`EntryIterator` intentionally reuses caller-provided byte storage. Reusing that
+storage before all `FrameView`, parameter, and observation borrows from the
+current record are finished would invalidate active protocol data.
+
+At the same time, PID 192 reassembly state is specifically designed to persist
+across physical frames and capture records.
+
+### Consequence
+
+The pipeline preserves this distinction:
+
+```text
+borrowed record bytes
+    → must be drained before reuse
+
+stateful decoder / multisection bank
+    → intentionally survives into later records
+```
+
+Synthetic tests verify PID 192 completion across separate capture records while
+respecting this storage lifetime rule.
+
+---
+
+## AD-018 — Recovered non-J1587 J1708 frames remain visible evidence
+
+**Status:** Accepted
+
+### Decision
+
+A recovered checksum-valid J1708 frame whose MID is outside the J1587 range is not
+an error and is not silently discarded.
+
+The capture pipeline exposes it as an `unhandled_frame` event with basic frame
+metadata and a reason such as `not_j1587`.
+
+Unsupported J1587 page/layout cases may be surfaced through the same evidence
+channel when they are not structurally invalid.
+
+### Why
+
+Valid J1708 traffic is broader than J1587 traffic.
+
+The first full authentic-capture run exposed repeated recovered frames outside
+the J1587 MID range. Treating those frames as fatal caused the initial
+end-to-end inspection attempt to abort even though the underlying J1708 evidence
+was valid.
+
+Preserving them as events keeps protocol support boundaries separate from capture
+validity.
 
 ---
 

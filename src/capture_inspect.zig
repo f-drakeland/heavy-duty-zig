@@ -1,0 +1,129 @@
+const std = @import("std");
+const Io = std.Io;
+
+const capture_pipeline = @import("capture_pipeline.zig");
+const j1587 = @import("j1587.zig");
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const arena = init.arena.allocator();
+
+    const args = try init.minimal.args.toSlice(arena);
+
+    if (args.len != 2) {
+        try Io.File.stderr().writeStreamingAll(
+            io,
+            "usage: capture_inspect <capture-file>\n",
+        );
+        return;
+    }
+
+    const path = args[1];
+
+    const input = try Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        arena,
+        .limited(16 * 1024 * 1024),
+    );
+
+    var byte_storage: [4096]u8 = undefined;
+    var scratch: [4097]@import("frame_recovery.zig").ScratchState =
+        undefined;
+
+    var decoder = j1587.Decoder.init();
+
+    var capture = capture_pipeline.CaptureCursor.init(
+        input,
+        &byte_storage,
+        &scratch,
+        &decoder,
+    );
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer =
+        Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    var event_count: usize = 0;
+
+    while (try capture.next()) |output| {
+        switch (output) {
+            .audit => |audit| {
+                try stdout.print(
+                    "line {d}: {s}\n",
+                    .{
+                        audit.line_number,
+                        @tagName(audit.status),
+                    },
+                );
+            },
+
+            .event => |event_entry| {
+                event_count += 1;
+
+                switch (event_entry.event) {
+                    .unhandled_frame => |frame| {
+                        try stdout.print(
+                            "line {d}: J1708 frame MID {d} ({d} bytes), {s}\n",
+                            .{
+                                event_entry.line_number,
+                                frame.mid,
+                                frame.byte_length,
+                                @tagName(frame.reason),
+                            },
+                        );
+                    },
+
+                    .j1587 => |j1587_event| {
+                        switch (j1587_event) {
+                            .unsupported_parameter => |unsupported| {
+                                try stdout.print(
+                                    "line {d}: unsupported PID {d} from MID {d} ({d} bytes)\n",
+                                    .{
+                                        event_entry.line_number,
+                                        unsupported.pid,
+                                        unsupported.source_mid,
+                                        unsupported.data_length,
+                                    },
+                                );
+                            },
+
+                            .observation => |observation| {
+                                try stdout.print(
+                                    "line {d}: observation {s}\n",
+                                    .{
+                                        event_entry.line_number,
+                                        @tagName(observation),
+                                    },
+                                );
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    const summary = capture.summary();
+
+    try stdout.print(
+        "\nCapture summary\n" ++
+            "records:       {d}\n" ++
+            "recovered:     {d}\n" ++
+            "ambiguous:     {d}\n" ++
+            "unrecoverable: {d}\n" ++
+            "rejected:      {d}\n" ++
+            "events:        {d}\n",
+        .{
+            summary.records,
+            summary.recovered,
+            summary.ambiguous,
+            summary.unrecoverable,
+            summary.rejected,
+            event_count,
+        },
+    );
+
+    try stdout.flush();
+}

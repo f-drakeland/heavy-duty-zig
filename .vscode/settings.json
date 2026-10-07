@@ -1,0 +1,6 @@
+{
+    "zig.testArgs": [
+        "build",
+        "test",
+    ]
+}
