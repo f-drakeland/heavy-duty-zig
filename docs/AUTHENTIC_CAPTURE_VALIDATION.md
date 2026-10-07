@@ -135,8 +135,64 @@ line 308: diagnostic_code
 This demonstrates that authentic logger text can currently reach typed protocol
 observations without using synthetic pseudo-message input.
 
-The current inspection output reports observation type names only. A later
-improvement may print the decoded observation contents for direct human review.
+### Decoded observation contents
+
+The inspection tool was then extended to print the decoded contents of supported
+observations while leaving the underlying protocol representation unchanged.
+
+The authentic component-identification observation on line 25 decoded as:
+
+```text
+source MID:    128
+component MID: 128
+manufacturer:  "CMMNS"
+model:         "99 N14-475E"
+serial:        "<redacted-serial>"
+```
+
+These strings are recorded as decoded protocol fields only. This validation does
+not independently identify the physical component or expand `"CMMNS"` into a
+manufacturer name.
+
+The six vehicle-distance observations were identical:
+
+```text
+source MID: 128
+raw count:  14485030
+kilometers: 2332089.83
+miles:      1448503.00
+```
+
+The same raw count and decoded distance appeared on lines 28, 110, 170, 229, 238,
+and 290.
+
+The two diagnostic-code observations decoded as:
+
+```text
+line 290:
+    source MID:       128
+    identifier kind:  pid
+    identifier:       190
+    FMI:              2
+    status:           inactive
+    occurrence count: 1
+
+line 308:
+    source MID:       140
+    identifier kind:  pid
+    identifier:       168
+    FMI:              1
+    status:           active
+    occurrence count: not present
+```
+
+The inspection CLI trims presentation padding such as trailing spaces and NUL
+bytes from component-identification fields for display only. The parser-level
+decoded slices remain unchanged.
+
+This output strengthens the end-to-end result: HDZ is not only recognizing
+observation types from the authentic file, but surfacing concrete decoded
+diagnostic evidence from them.
 
 ---
 

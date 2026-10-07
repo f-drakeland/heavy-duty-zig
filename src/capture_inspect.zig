@@ -90,13 +90,103 @@ pub fn main(init: std.process.Init) !void {
                             },
 
                             .observation => |observation| {
-                                try stdout.print(
-                                    "line {d}: observation {s}\n",
-                                    .{
-                                        event_entry.line_number,
-                                        @tagName(observation),
+                                switch (observation) {
+                                    .software_identification => |software| {
+                                        try stdout.print(
+                                            "line {d}: software MID {d} \"{s}\"\n",
+                                            .{
+                                                event_entry.line_number,
+                                                software.source_mid,
+                                                software.value,
+                                            },
+                                        );
                                     },
-                                );
+
+                                    .vin => |vin| {
+                                        try stdout.print(
+                                            "line {d}: VIN MID {d} \"{s}\"\n",
+                                            .{
+                                                event_entry.line_number,
+                                                vin.source_mid,
+                                                vin.value,
+                                            },
+                                        );
+                                    },
+
+                                    .component_identification => |component| {
+                                        const display_manufacturer = std.mem.trim(
+                                            u8,
+                                            component.manufacturer,
+                                            " \x00",
+                                        );
+
+                                        const display_model = std.mem.trim(
+                                            u8,
+                                            component.model_name,
+                                            " \x00",
+                                        );
+
+                                        const display_serial = std.mem.trim(
+                                            u8,
+                                            component.serial,
+                                            " \x00",
+                                        );
+
+                                        try stdout.print(
+                                            "line {d}: component source MID {d}, component MID {d}, manufacturer \"{s}\", model \"{s}\", serial \"{s}\"\n",
+                                            .{
+                                                event_entry.line_number,
+                                                component.source_mid,
+                                                component.component_mid,
+                                                display_manufacturer,
+                                                display_model,
+                                                display_serial,
+                                            },
+                                        );
+                                    },
+
+                                    .vehicle_distance => |distance| {
+                                        try stdout.print(
+                                            "line {d}: vehicle distance MID {d}, raw {d}, {d:.2} km, {d:.2} mi\n",
+                                            .{
+                                                event_entry.line_number,
+                                                distance.source_mid,
+                                                distance.raw_count,
+                                                distance.kilometers,
+                                                distance.miles,
+                                            },
+                                        );
+                                    },
+
+                                    .diagnostic_code => |code| {
+                                        if (code.occurrence_count) |count| {
+                                            try stdout.print(
+                                                "line {d}: diagnostic MID {d}, {s} {d}, FMI {d}, {s}, occurrences {d}\n",
+                                                .{
+                                                    event_entry.line_number,
+                                                    code.source_mid,
+                                                    @tagName(code.identifier_kind),
+                                                    code.identifier,
+                                                    code.fmi,
+                                                    @tagName(code.status),
+                                                    count,
+                                                },
+                                            );
+                                        } else {
+                                            try stdout.print(
+                                                "line {d}: diagnostic MID {d}, {s} {d}, FMI {d}, {s}\n",
+                                                .{
+                                                    event_entry.line_number,
+                                                    code.source_mid,
+                                                    @tagName(code.identifier_kind),
+                                                    code.identifier,
+                                                    code.fmi,
+                                                    @tagName(code.status),
+                                                },
+                                            );
+                                        }
+                                    },
+                                }
                             },
                         }
                     },
