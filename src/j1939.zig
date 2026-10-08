@@ -3,6 +3,10 @@ const can = @import("can.zig");
 
 pub const pdu2_format_min: u8 = 0xf0;
 
+pub const pgn_transport_data_transfer: u32 = 0x00eb00;
+pub const pgn_transport_connection_management: u32 = 0x00ec00;
+pub const pgn_diagnostic_message_1: u32 = 0x00feca;
+
 pub const ParseError = error{
     StandardIdentifierNotJ1939,
     RemoteFrameNotJ1939,
@@ -12,6 +16,27 @@ pub const PduKind = enum {
     pdu1,
     pdu2,
 };
+
+pub const PgnClassification = union(enum) {
+    transport_data_transfer,
+    transport_connection_management,
+    diagnostic_message_1,
+    unsupported: u32,
+};
+
+pub fn classifyPgn(pgn: u32) PgnClassification {
+    return switch (pgn) {
+        pgn_transport_data_transfer => .transport_data_transfer,
+
+        pgn_transport_connection_management => .transport_connection_management,
+
+        pgn_diagnostic_message_1 => .diagnostic_message_1,
+
+        else => .{
+            .unsupported = pgn,
+        },
+    };
+}
 
 /// Decoded semantics of one J1939 29-bit CAN identifier.
 ///
@@ -115,6 +140,14 @@ pub const FrameView = struct {
 
     pub fn identifier(self: FrameView) Identifier {
         return self.identifier_info;
+    }
+
+    pub fn pgnClassification(
+        self: FrameView,
+    ) PgnClassification {
+        return classifyPgn(
+            self.identifier_info.pgn,
+        );
     }
 
     pub fn data(self: FrameView) []const u8 {
@@ -340,4 +373,40 @@ test "J1939 frame view preserves identifier and CAN payload" {
         @as(u32, 0x18f004fe),
         frame.underlyingCanFrame().identifier(),
     );
+}
+
+test "classifies transport protocol PGNs" {
+    try std.testing.expect(
+        classifyPgn(pgn_transport_data_transfer) ==
+            .transport_data_transfer,
+    );
+
+    try std.testing.expect(
+        classifyPgn(
+            pgn_transport_connection_management,
+        ) == .transport_connection_management,
+    );
+}
+
+test "classifies DM1 PGN" {
+    try std.testing.expect(
+        classifyPgn(
+            pgn_diagnostic_message_1,
+        ) == .diagnostic_message_1,
+    );
+}
+
+test "unsupported PGN preserves numeric value" {
+    const classification =
+        classifyPgn(0x00f004);
+
+    switch (classification) {
+        .unsupported => |pgn| {
+            try std.testing.expectEqual(
+                @as(u32, 0x00f004),
+                pgn,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
