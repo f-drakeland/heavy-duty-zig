@@ -32,6 +32,40 @@ pub const MessageDelivery = enum {
     bam,
 };
 
+pub const Dm1LampObservation = struct {
+    source_address: u8,
+    delivery: MessageDelivery,
+    statuses: dm1.LampStatuses,
+    flashes: dm1.LampFlashes,
+};
+
+pub const Dm1DiagnosticTroubleCodeObservation = struct {
+    source_address: u8,
+    delivery: MessageDelivery,
+    trouble_code: dm1.DiagnosticTroubleCode,
+};
+
+pub const Observation = union(enum) {
+    dm1_lamps: Dm1LampObservation,
+    dm1_diagnostic_trouble_code: Dm1DiagnosticTroubleCodeObservation,
+};
+
+pub const UnsupportedMessage = struct {
+    pgn: u32,
+    source_address: u8,
+    delivery: MessageDelivery,
+    data: []const u8,
+};
+
+pub const MessageEvent = union(enum) {
+    observation: Observation,
+    unsupported_pgn: UnsupportedMessage,
+};
+
+pub const MessageDecodeError =
+    dm1.PayloadError ||
+    dm1.ParseError;
+
 pub fn classifyPgn(pgn: u32) PgnClassification {
     return switch (pgn) {
         pgn_transport_data_transfer => .transport_data_transfer,
@@ -213,6 +247,116 @@ pub const MessageView = struct {
 
     pub fn delivery(self: MessageView) MessageDelivery {
         return self.delivery_method;
+    }
+};
+
+pub const MessageCursor = struct {
+    source_address: u8,
+    delivery_method: MessageDelivery,
+    state: State,
+
+    const Dm1State = struct {
+        payload: dm1.PayloadView,
+        iterator: dm1.DtcIterator,
+        lamps_emitted: bool = false,
+    };
+
+    const UnsupportedState = struct {
+        pgn: u32,
+        data: []const u8,
+        emitted: bool = false,
+    };
+
+    const State = union(enum) {
+        dm1: Dm1State,
+        unsupported: UnsupportedState,
+    };
+
+    pub fn init(
+        message: MessageView,
+    ) MessageDecodeError!MessageCursor {
+        if (message.pgn() != pgn_diagnostic_message_1) {
+            return .{
+                .source_address = message.sourceAddress(),
+                .delivery_method = message.delivery(),
+                .state = .{
+                    .unsupported = .{
+                        .pgn = message.pgn(),
+                        .data = message.data(),
+                    },
+                },
+            };
+        }
+
+        const payload =
+            try dm1.PayloadView.fromBytes(
+                message.data(),
+            );
+
+        return .{
+            .source_address = message.sourceAddress(),
+            .delivery_method = message.delivery(),
+            .state = .{
+                .dm1 = .{
+                    .payload = payload,
+                    .iterator = payload.dtcs(),
+                },
+            },
+        };
+    }
+
+    pub fn next(
+        self: *MessageCursor,
+    ) MessageDecodeError!?MessageEvent {
+        switch (self.state) {
+            .unsupported => |*unsupported| {
+                if (unsupported.emitted) {
+                    return null;
+                }
+
+                unsupported.emitted = true;
+
+                return .{
+                    .unsupported_pgn = .{
+                        .pgn = unsupported.pgn,
+                        .source_address = self.source_address,
+                        .delivery = self.delivery_method,
+                        .data = unsupported.data,
+                    },
+                };
+            },
+
+            .dm1 => |*state| {
+                if (!state.lamps_emitted) {
+                    state.lamps_emitted = true;
+
+                    return .{
+                        .observation = .{
+                            .dm1_lamps = .{
+                                .source_address = self.source_address,
+                                .delivery = self.delivery_method,
+                                .statuses = state.payload.lampStatuses(),
+                                .flashes = state.payload.lampFlashes(),
+                            },
+                        },
+                    };
+                }
+
+                if (try state.iterator.next()) |dtc| {
+                    return .{
+                        .observation = .{
+                            .dm1_diagnostic_trouble_code = .{
+                                .source_address = self.source_address,
+                                .delivery = self.delivery_method,
+                                .trouble_code = dtc,
+                            },
+                        },
+                    };
+                }
+
+                return null;
+            },
+        }
     }
 };
 
@@ -564,5 +708,160 @@ test "logical message view accepts BAM-reassembled payload" {
         u8,
         &payload,
         message.data(),
+    );
+}
+
+test "DM1 logical message produces typed observations" {
+    const payload = [_]u8{
+        0b01_00_01_11,
+        0b00_01_10_11,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0xff,
+        0xff,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18feca80,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    const message =
+        MessageView.fromSingleFrame(frame);
+
+    var cursor =
+        try MessageCursor.init(message);
+
+    const first = (try cursor.next()).?;
+
+    switch (first) {
+        .observation => |observation| {
+            switch (observation) {
+                .dm1_lamps => |lamps| {
+                    try std.testing.expectEqual(
+                        @as(u8, 0x80),
+                        lamps.source_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        MessageDelivery.single_frame,
+                        lamps.delivery,
+                    );
+
+                    try std.testing.expectEqual(
+                        dm1.LampStatus.on,
+                        lamps.statuses.malfunction_indicator,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second = (try cursor.next()).?;
+
+    switch (second) {
+        .observation => |observation| {
+            switch (observation) {
+                .dm1_diagnostic_trouble_code => |diagnostic| {
+                    try std.testing.expectEqual(
+                        @as(u8, 0x80),
+                        diagnostic.source_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(?u32, 0x52345),
+                        diagnostic.trouble_code.spn,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(u8, 7),
+                        diagnostic.trouble_code.fmi,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
+    );
+}
+
+test "unsupported logical message preserves payload evidence" {
+    const payload = [_]u8{
+        0x11,
+        0x22,
+        0x33,
+        0x44,
+        0x55,
+        0x66,
+        0x77,
+        0x88,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18f00480,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    const message =
+        MessageView.fromSingleFrame(frame);
+
+    var cursor =
+        try MessageCursor.init(message);
+
+    const event = (try cursor.next()).?;
+
+    switch (event) {
+        .unsupported_pgn => |unsupported| {
+            try std.testing.expectEqual(
+                @as(u32, 0x00f004),
+                unsupported.pgn,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0x80),
+                unsupported.source_address,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.single_frame,
+                unsupported.delivery,
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &payload,
+                unsupported.data,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
     );
 }
