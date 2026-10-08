@@ -93,6 +93,39 @@ pub const Identifier = struct {
     }
 };
 
+/// Borrowed view of one CAN data frame carrying J1939 identifier semantics.
+///
+/// This represents one physical CAN frame. It does not imply that the complete
+/// J1939 application message fits in one frame.
+pub const FrameView = struct {
+    can_frame: can.FrameView,
+    identifier_info: Identifier,
+
+    pub fn fromCanFrame(
+        can_frame: can.FrameView,
+    ) ParseError!FrameView {
+        const identifier_info =
+            try Identifier.fromFrame(can_frame);
+
+        return .{
+            .can_frame = can_frame,
+            .identifier_info = identifier_info,
+        };
+    }
+
+    pub fn identifier(self: FrameView) Identifier {
+        return self.identifier_info;
+    }
+
+    pub fn data(self: FrameView) []const u8 {
+        return self.can_frame.data();
+    }
+
+    pub fn underlyingCanFrame(self: FrameView) can.FrameView {
+        return self.can_frame;
+    }
+};
+
 test "parses PDU2 extended identifier" {
     const payload = [_]u8{
         0,
@@ -261,5 +294,50 @@ test "rejects CAN remote frame as J1939" {
     try std.testing.expectError(
         error.RemoteFrameNotJ1939,
         Identifier.fromFrame(frame),
+    );
+}
+
+test "J1939 frame view preserves identifier and CAN payload" {
+    const payload = [_]u8{
+        0x11,
+        0x22,
+        0x33,
+        0x44,
+        0x55,
+        0x66,
+        0x77,
+        0x88,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18f004fe,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame = try FrameView.fromCanFrame(can_frame);
+    const identifier = frame.identifier();
+
+    try std.testing.expectEqual(
+        @as(u32, 0x00f004),
+        identifier.pgn,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0xfe),
+        identifier.source_address,
+    );
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &payload,
+        frame.data(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, 0x18f004fe),
+        frame.underlyingCanFrame().identifier(),
     );
 }
