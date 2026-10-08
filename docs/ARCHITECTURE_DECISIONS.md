@@ -406,7 +406,18 @@ data.
 
 ---
 
-# Current Milestone 5 architecture
+## Milestone 5 status
+
+**Complete.**
+
+Milestone 5 established and authentically validated the file-backed J1708/J1587
+ingestion pipeline from external capture text through conservative recovery and
+typed diagnostic observations.
+
+The milestone does not include live vehicle acquisition, waveform decoding,
+complete PID coverage, or active diagnostics. Those remain future work.
+
+# Milestone 5 architecture
 
 The current intended flow is:
 

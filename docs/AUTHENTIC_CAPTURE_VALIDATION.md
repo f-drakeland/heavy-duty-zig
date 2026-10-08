@@ -464,8 +464,8 @@ The validated claim is narrower:
 
 ## Milestone significance
 
-This run is the first end-to-end authentic-data validation of the Milestone 5
-pipeline.
+This run completes the end-to-end authentic-data validation required for
+Milestone 5.
 
 Before this point, individual protocol and orchestration layers were covered by
 synthetic unit tests and selected local authentic-data checks.
