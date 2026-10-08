@@ -19,6 +19,42 @@ pub const PayloadError = error{
     InvalidPayloadLength,
 };
 
+pub const LampStatus = enum(u2) {
+    off = 0,
+    on = 1,
+    code_2 = 2,
+    code_3 = 3,
+};
+
+pub const LampFlash = enum(u2) {
+    slow = 0,
+    fast = 1,
+    code_2 = 2,
+    code_3 = 3,
+};
+
+pub const LampStatuses = struct {
+    malfunction_indicator: LampStatus,
+    red_stop: LampStatus,
+    amber_warning: LampStatus,
+    protect: LampStatus,
+};
+
+pub const LampFlashes = struct {
+    malfunction_indicator: LampFlash,
+    red_stop: LampFlash,
+    amber_warning: LampFlash,
+    protect: LampFlash,
+};
+
+fn lampStatusFromBits(value: u8) LampStatus {
+    return @fromBackingInt(@intCast(@as(u2, @truncate(value))));
+}
+
+fn lampFlashFromBits(value: u8) LampFlash {
+    return @fromBackingInt(@intCast(@as(u2, @truncate(value))));
+}
+
 pub const PayloadView = struct {
     raw: []const u8,
     lamp_status_byte: u8,
@@ -58,6 +94,30 @@ pub const PayloadView = struct {
         return .{
             .remaining = self.dtc_data,
             .allow_empty_dtc = self.raw.len == 8,
+        };
+    }
+
+    pub fn lampStatuses(self: PayloadView) LampStatuses {
+        return .{
+            .malfunction_indicator = lampStatusFromBits(self.lamp_status_byte >> 6),
+
+            .red_stop = lampStatusFromBits(self.lamp_status_byte >> 4),
+
+            .amber_warning = lampStatusFromBits(self.lamp_status_byte >> 2),
+
+            .protect = lampStatusFromBits(self.lamp_status_byte),
+        };
+    }
+
+    pub fn lampFlashes(self: PayloadView) LampFlashes {
+        return .{
+            .malfunction_indicator = lampFlashFromBits(self.lamp_flash_byte >> 6),
+
+            .red_stop = lampFlashFromBits(self.lamp_flash_byte >> 4),
+
+            .amber_warning = lampFlashFromBits(self.lamp_flash_byte >> 2),
+
+            .protect = lampFlashFromBits(self.lamp_flash_byte),
         };
     }
 };
@@ -379,5 +439,64 @@ test "rejects empty DTC slot in multi-DTC logical payload" {
     try std.testing.expectError(
         error.UnexpectedEmptyDtcSlot,
         iterator.next(),
+    );
+}
+
+test "decodes DM1 lamp status and flash fields" {
+    const data = [_]u8{
+        0b01_00_01_11,
+        0b00_01_10_11,
+        0,
+        0,
+        0,
+        0,
+        0xff,
+        0xff,
+    };
+
+    const payload =
+        try PayloadView.fromBytes(&data);
+
+    const statuses = payload.lampStatuses();
+    const flashes = payload.lampFlashes();
+
+    try std.testing.expectEqual(
+        LampStatus.on,
+        statuses.malfunction_indicator,
+    );
+
+    try std.testing.expectEqual(
+        LampStatus.off,
+        statuses.red_stop,
+    );
+
+    try std.testing.expectEqual(
+        LampStatus.on,
+        statuses.amber_warning,
+    );
+
+    try std.testing.expectEqual(
+        LampStatus.code_3,
+        statuses.protect,
+    );
+
+    try std.testing.expectEqual(
+        LampFlash.slow,
+        flashes.malfunction_indicator,
+    );
+
+    try std.testing.expectEqual(
+        LampFlash.fast,
+        flashes.red_stop,
+    );
+
+    try std.testing.expectEqual(
+        LampFlash.code_2,
+        flashes.amber_warning,
+    );
+
+    try std.testing.expectEqual(
+        LampFlash.code_3,
+        flashes.protect,
     );
 }
