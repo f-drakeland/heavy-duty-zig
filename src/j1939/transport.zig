@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const reassembly = @import("transport_reassembly.zig");
+
 pub const bam_control: u8 = 0x20;
 pub const frame_data_length: usize = 8;
 
@@ -84,6 +86,10 @@ pub fn parseDataTransferData(
         .sequence_number = sequence_number,
         .data = data[1..],
     };
+}
+
+test {
+    _ = reassembly;
 }
 
 test "parses BAM connection-management data" {
