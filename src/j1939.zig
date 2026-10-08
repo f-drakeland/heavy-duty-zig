@@ -83,7 +83,10 @@ pub const MessageAssemblyEvent = union(enum) {
 };
 
 pub const MessageAssemblyError =
-    error{InvalidBamDestination} ||
+    error{
+        InvalidBamDestination,
+        SessionCapacityExceeded,
+    } ||
     transport.ParseError ||
     transport.reassembly.ReassemblyError;
 
@@ -275,11 +278,53 @@ pub const MessageView = struct {
     }
 };
 
-pub fn MessageAssembler(comptime capacity: usize) type {
+pub fn MessageAssembler(
+    comptime message_capacity: usize,
+    comptime session_capacity: usize,
+) type {
     return struct {
         const Self = @This();
 
-        reassembler: transport.reassembly.Reassembler(capacity) = .{},
+        const Reassembler =
+            transport.reassembly.Reassembler(
+                message_capacity,
+            );
+
+        const BamSession = struct {
+            occupied: bool = false,
+            source_address: u8 = 0,
+            reassembler: Reassembler = .{},
+        };
+
+        sessions: [session_capacity]BamSession =
+            @splat(.{}),
+
+        fn findSession(
+            self: *Self,
+            source_address: u8,
+        ) ?*BamSession {
+            for (&self.sessions) |*session| {
+                if (session.occupied and
+                    session.source_address == source_address)
+                {
+                    return session;
+                }
+            }
+
+            return null;
+        }
+
+        fn findFreeSession(
+            self: *Self,
+        ) ?*BamSession {
+            for (&self.sessions) |*session| {
+                if (!session.occupied) {
+                    return session;
+                }
+            }
+
+            return null;
+        }
 
         pub fn pushFrame(
             self: *Self,
@@ -300,12 +345,21 @@ pub fn MessageAssembler(comptime capacity: usize) type {
                                 return error.InvalidBamDestination;
                             }
 
-                            try self.reassembler.startBam(
+                            const session =
+                                self.findSession(identifier.source_address) orelse
+                                self.findFreeSession() orelse
+                                return error.SessionCapacityExceeded;
+
+                            try session.reassembler.startBam(
                                 identifier.source_address,
                                 bam.total_message_size,
                                 bam.packet_count,
                                 bam.target_pgn,
                             );
+
+                            session.occupied = true;
+                            session.source_address =
+                                identifier.source_address;
 
                             return .{
                                 .bam_started = .{
@@ -336,14 +390,20 @@ pub fn MessageAssembler(comptime capacity: usize) type {
                             frame.data(),
                         );
 
+                    const session =
+                        self.findSession(identifier.source_address) orelse
+                        return error.NoActiveTransfer;
+
                     const completed =
-                        try self.reassembler.pushData(
+                        try session.reassembler.pushData(
                             identifier.source_address,
                             packet.sequence_number,
                             packet.data,
                         );
 
                     if (completed) |message| {
+                        session.occupied = false;
+
                         return .{
                             .message = MessageView.fromBam(message),
                         };
@@ -361,7 +421,11 @@ pub fn MessageAssembler(comptime capacity: usize) type {
         }
 
         pub fn reset(self: *Self) void {
-            self.reassembler.reset();
+            for (&self.sessions) |*session| {
+                session.reassembler.reset();
+                session.occupied = false;
+                session.source_address = 0;
+            }
         }
     };
 }
@@ -1005,7 +1069,7 @@ test "message assembler routes ordinary J1939 frame to logical message" {
     const frame =
         try FrameView.fromCanFrame(can_frame);
 
-    var assembler = MessageAssembler(64){};
+    var assembler = MessageAssembler(64, 4){};
 
     const event =
         (try assembler.pushFrame(frame)).?;
@@ -1105,7 +1169,7 @@ test "message assembler reassembles BAM into logical DM1 message" {
     const packet_2 =
         try FrameView.fromCanFrame(packet_2_can_frame);
 
-    var assembler = MessageAssembler(64){};
+    var assembler = MessageAssembler(64, 4){};
 
     const start_event =
         (try assembler.pushFrame(bam_frame)).?;
@@ -1260,10 +1324,187 @@ test "rejects BAM announcement that is not globally addressed" {
     const frame =
         try FrameView.fromCanFrame(can_frame);
 
-    var assembler = MessageAssembler(64){};
+    var assembler = MessageAssembler(64, 4){};
 
     try std.testing.expectError(
         error.InvalidBamDestination,
         assembler.pushFrame(frame),
+    );
+}
+
+test "message assembler keeps overlapping BAM sessions isolated by source" {
+    const bam_a_data = [_]u8{
+        0x20,
+        10,
+        0,
+        2,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const bam_b_data = [_]u8{
+        0x20,
+        10,
+        0,
+        2,
+        0xff,
+        0xe3,
+        0xfe,
+        0x00,
+    };
+
+    const a_packet_1_data = [_]u8{
+        1,
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+    };
+
+    const a_packet_2_data = [_]u8{
+        2,
+        0x08,
+        0x09,
+        0x0a,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const b_packet_1_data = [_]u8{
+        1,
+        0x11,
+        0x12,
+        0x13,
+        0x14,
+        0x15,
+        0x16,
+        0x17,
+    };
+
+    const b_packet_2_data = [_]u8{
+        2,
+        0x18,
+        0x19,
+        0x1a,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const bam_a = try FrameView.fromCanFrame(
+        try can.FrameView.fromParts(
+            0x18ecff31,
+            .extended,
+            .data,
+            8,
+            &bam_a_data,
+        ),
+    );
+
+    const bam_b = try FrameView.fromCanFrame(
+        try can.FrameView.fromParts(
+            0x18ecff0b,
+            .extended,
+            .data,
+            8,
+            &bam_b_data,
+        ),
+    );
+
+    const a_packet_1 = try FrameView.fromCanFrame(
+        try can.FrameView.fromParts(
+            0x18ebff31,
+            .extended,
+            .data,
+            8,
+            &a_packet_1_data,
+        ),
+    );
+
+    const a_packet_2 = try FrameView.fromCanFrame(
+        try can.FrameView.fromParts(
+            0x18ebff31,
+            .extended,
+            .data,
+            8,
+            &a_packet_2_data,
+        ),
+    );
+
+    const b_packet_1 = try FrameView.fromCanFrame(
+        try can.FrameView.fromParts(
+            0x18ebff0b,
+            .extended,
+            .data,
+            8,
+            &b_packet_1_data,
+        ),
+    );
+
+    const b_packet_2 = try FrameView.fromCanFrame(
+        try can.FrameView.fromParts(
+            0x18ebff0b,
+            .extended,
+            .data,
+            8,
+            &b_packet_2_data,
+        ),
+    );
+
+    var assembler = MessageAssembler(64, 2){};
+
+    _ = (try assembler.pushFrame(bam_a)).?;
+    _ = (try assembler.pushFrame(bam_b)).?;
+
+    try std.testing.expect(
+        try assembler.pushFrame(a_packet_1) == null,
+    );
+
+    try std.testing.expect(
+        try assembler.pushFrame(b_packet_1) == null,
+    );
+
+    const b_completed =
+        (try assembler.pushFrame(b_packet_2)).?;
+
+    const b_message = switch (b_completed) {
+        .message => |message| message,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expectEqual(
+        @as(u8, 0x0b),
+        b_message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, 0x00fee3),
+        b_message.pgn(),
+    );
+
+    const a_completed =
+        (try assembler.pushFrame(a_packet_2)).?;
+
+    const a_message = switch (a_completed) {
+        .message => |message| message,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expectEqual(
+        @as(u8, 0x31),
+        a_message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, 0x00feeb),
+        a_message.pgn(),
     );
 }
