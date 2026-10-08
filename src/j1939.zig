@@ -2,6 +2,7 @@ const std = @import("std");
 const can = @import("can.zig");
 
 pub const transport = @import("j1939/transport.zig");
+pub const dm1 = @import("j1939/dm1.zig");
 
 pub const pdu2_format_min: u8 = 0xf0;
 
@@ -163,6 +164,7 @@ pub const FrameView = struct {
 
 test {
     _ = transport;
+    _ = dm1;
 }
 
 test "parses PDU2 extended identifier" {
