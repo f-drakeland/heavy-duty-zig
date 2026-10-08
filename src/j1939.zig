@@ -62,6 +62,31 @@ pub const MessageEvent = union(enum) {
     unsupported_pgn: UnsupportedMessage,
 };
 
+pub const BamStarted = struct {
+    source_address: u8,
+    target_pgn: u32,
+    total_message_size: u16,
+    packet_count: u8,
+};
+
+pub const UnsupportedTransportControl = struct {
+    source_address: u8,
+    destination_address: ?u8,
+    control: u8,
+    data: []const u8,
+};
+
+pub const MessageAssemblyEvent = union(enum) {
+    message: MessageView,
+    bam_started: BamStarted,
+    unsupported_transport_control: UnsupportedTransportControl,
+};
+
+pub const MessageAssemblyError =
+    error{InvalidBamDestination} ||
+    transport.ParseError ||
+    transport.reassembly.ReassemblyError;
+
 pub const MessageDecodeError =
     dm1.PayloadError ||
     dm1.ParseError;
@@ -249,6 +274,97 @@ pub const MessageView = struct {
         return self.delivery_method;
     }
 };
+
+pub fn MessageAssembler(comptime capacity: usize) type {
+    return struct {
+        const Self = @This();
+
+        reassembler: transport.reassembly.Reassembler(capacity) = .{},
+
+        pub fn pushFrame(
+            self: *Self,
+            frame: FrameView,
+        ) MessageAssemblyError!?MessageAssemblyEvent {
+            const identifier = frame.identifier();
+
+            switch (frame.pgnClassification()) {
+                .transport_connection_management => {
+                    const connection_management =
+                        try transport.parseConnectionManagementData(
+                            frame.data(),
+                        );
+
+                    switch (connection_management) {
+                        .bam => |bam| {
+                            if (identifier.destination_address != @as(?u8, 0xff)) {
+                                return error.InvalidBamDestination;
+                            }
+
+                            try self.reassembler.startBam(
+                                identifier.source_address,
+                                bam.total_message_size,
+                                bam.packet_count,
+                                bam.target_pgn,
+                            );
+
+                            return .{
+                                .bam_started = .{
+                                    .source_address = identifier.source_address,
+                                    .target_pgn = bam.target_pgn,
+                                    .total_message_size = bam.total_message_size,
+                                    .packet_count = bam.packet_count,
+                                },
+                            };
+                        },
+
+                        .unsupported => |unsupported| {
+                            return .{
+                                .unsupported_transport_control = .{
+                                    .source_address = identifier.source_address,
+                                    .destination_address = identifier.destination_address,
+                                    .control = unsupported.control,
+                                    .data = unsupported.data,
+                                },
+                            };
+                        },
+                    }
+                },
+
+                .transport_data_transfer => {
+                    const packet =
+                        try transport.parseDataTransferData(
+                            frame.data(),
+                        );
+
+                    const completed =
+                        try self.reassembler.pushData(
+                            identifier.source_address,
+                            packet.sequence_number,
+                            packet.data,
+                        );
+
+                    if (completed) |message| {
+                        return .{
+                            .message = MessageView.fromBam(message),
+                        };
+                    }
+
+                    return null;
+                },
+
+                else => {
+                    return .{
+                        .message = MessageView.fromSingleFrame(frame),
+                    };
+                },
+            }
+        }
+
+        pub fn reset(self: *Self) void {
+            self.reassembler.reset();
+        }
+    };
+}
 
 pub const MessageCursor = struct {
     source_address: u8,
@@ -863,5 +979,291 @@ test "unsupported logical message preserves payload evidence" {
 
     try std.testing.expect(
         try cursor.next() == null,
+    );
+}
+
+test "message assembler routes ordinary J1939 frame to logical message" {
+    const payload = [_]u8{
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0xff,
+        0xff,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18feca80,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    var assembler = MessageAssembler(64){};
+
+    const event =
+        (try assembler.pushFrame(frame)).?;
+
+    switch (event) {
+        .message => |message| {
+            try std.testing.expectEqual(
+                @as(u32, pgn_diagnostic_message_1),
+                message.pgn(),
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0x80),
+                message.sourceAddress(),
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.single_frame,
+                message.delivery(),
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &payload,
+                message.data(),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "message assembler reassembles BAM into logical DM1 message" {
+    const bam_data = [_]u8{
+        0x20,
+        10,
+        0,
+        2,
+        0xff,
+        0xca,
+        0xfe,
+        0x00,
+    };
+
+    const packet_1_data = [_]u8{
+        1,
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0x34,
+    };
+
+    const packet_2_data = [_]u8{
+        2,
+        0x12,
+        0x83,
+        0x02,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const bam_can_frame = try can.FrameView.fromParts(
+        0x18ecff80,
+        .extended,
+        .data,
+        8,
+        &bam_data,
+    );
+
+    const packet_1_can_frame = try can.FrameView.fromParts(
+        0x18ebff80,
+        .extended,
+        .data,
+        8,
+        &packet_1_data,
+    );
+
+    const packet_2_can_frame = try can.FrameView.fromParts(
+        0x18ebff80,
+        .extended,
+        .data,
+        8,
+        &packet_2_data,
+    );
+
+    const bam_frame =
+        try FrameView.fromCanFrame(bam_can_frame);
+
+    const packet_1 =
+        try FrameView.fromCanFrame(packet_1_can_frame);
+
+    const packet_2 =
+        try FrameView.fromCanFrame(packet_2_can_frame);
+
+    var assembler = MessageAssembler(64){};
+
+    const start_event =
+        (try assembler.pushFrame(bam_frame)).?;
+
+    switch (start_event) {
+        .bam_started => |started| {
+            try std.testing.expectEqual(
+                @as(u8, 0x80),
+                started.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, pgn_diagnostic_message_1),
+                started.target_pgn,
+            );
+
+            try std.testing.expectEqual(
+                @as(u16, 10),
+                started.total_message_size,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 2),
+                started.packet_count,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try assembler.pushFrame(packet_1) == null,
+    );
+
+    const completed_event =
+        (try assembler.pushFrame(packet_2)).?;
+
+    const message = switch (completed_event) {
+        .message => |message| message,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expectEqual(
+        @as(u32, pgn_diagnostic_message_1),
+        message.pgn(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x80),
+        message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        MessageDelivery.bam,
+        message.delivery(),
+    );
+
+    const expected_payload = [_]u8{
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0x34,
+        0x12,
+        0x83,
+        0x02,
+    };
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_payload,
+        message.data(),
+    );
+
+    var cursor =
+        try MessageCursor.init(message);
+
+    _ = (try cursor.next()).?; // lamp observation
+
+    const first_dtc_event =
+        (try cursor.next()).?;
+
+    switch (first_dtc_event) {
+        .observation => |observation| {
+            switch (observation) {
+                .dm1_diagnostic_trouble_code => |diagnostic| {
+                    try std.testing.expectEqual(
+                        MessageDelivery.bam,
+                        diagnostic.delivery,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(?u32, 0x52345),
+                        diagnostic.trouble_code.spn,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second_dtc_event =
+        (try cursor.next()).?;
+
+    switch (second_dtc_event) {
+        .observation => |observation| {
+            switch (observation) {
+                .dm1_diagnostic_trouble_code => |diagnostic| {
+                    try std.testing.expectEqual(
+                        @as(?u32, 0x41234),
+                        diagnostic.trouble_code.spn,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
+    );
+}
+
+test "rejects BAM announcement that is not globally addressed" {
+    const bam_data = [_]u8{
+        0x20,
+        10,
+        0,
+        2,
+        0xff,
+        0xca,
+        0xfe,
+        0x00,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18ec0180,
+        .extended,
+        .data,
+        8,
+        &bam_data,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    var assembler = MessageAssembler(64){};
+
+    try std.testing.expectError(
+        error.InvalidBamDestination,
+        assembler.pushFrame(frame),
     );
 }
