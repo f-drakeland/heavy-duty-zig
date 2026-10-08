@@ -27,6 +27,11 @@ pub const PgnClassification = union(enum) {
     unsupported: u32,
 };
 
+pub const MessageDelivery = enum {
+    single_frame,
+    bam,
+};
+
 pub fn classifyPgn(pgn: u32) PgnClassification {
     return switch (pgn) {
         pgn_transport_data_transfer => .transport_data_transfer,
@@ -159,6 +164,55 @@ pub const FrameView = struct {
 
     pub fn underlyingCanFrame(self: FrameView) can.FrameView {
         return self.can_frame;
+    }
+};
+
+/// Borrowed view of one complete logical J1939 message payload.
+///
+/// A message may have arrived in one CAN frame or may have been reconstructed
+/// from J1939 transport-protocol traffic.
+pub const MessageView = struct {
+    pgn_value: u32,
+    source_address_value: u8,
+    payload: []const u8,
+    delivery_method: MessageDelivery,
+
+    pub fn fromSingleFrame(
+        frame: FrameView,
+    ) MessageView {
+        return .{
+            .pgn_value = frame.identifier_info.pgn,
+            .source_address_value = frame.identifier_info.source_address,
+            .payload = frame.data(),
+            .delivery_method = .single_frame,
+        };
+    }
+
+    pub fn fromBam(
+        completed: transport.reassembly.CompletedMessage,
+    ) MessageView {
+        return .{
+            .pgn_value = completed.target_pgn,
+            .source_address_value = completed.source_address,
+            .payload = completed.data,
+            .delivery_method = .bam,
+        };
+    }
+
+    pub fn pgn(self: MessageView) u32 {
+        return self.pgn_value;
+    }
+
+    pub fn sourceAddress(self: MessageView) u8 {
+        return self.source_address_value;
+    }
+
+    pub fn data(self: MessageView) []const u8 {
+        return self.payload;
+    }
+
+    pub fn delivery(self: MessageView) MessageDelivery {
+        return self.delivery_method;
     }
 };
 
@@ -417,4 +471,98 @@ test "unsupported PGN preserves numeric value" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "logical message view accepts single-frame J1939 payload" {
+    const payload = [_]u8{
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0xff,
+        0xff,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18feca80,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    const message =
+        MessageView.fromSingleFrame(frame);
+
+    try std.testing.expectEqual(
+        @as(u32, pgn_diagnostic_message_1),
+        message.pgn(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x80),
+        message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        MessageDelivery.single_frame,
+        message.delivery(),
+    );
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &payload,
+        message.data(),
+    );
+}
+
+test "logical message view accepts BAM-reassembled payload" {
+    const payload = [_]u8{
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0x34,
+        0x12,
+        0x83,
+        0x02,
+    };
+
+    const completed =
+        transport.reassembly.CompletedMessage{
+            .source_address = 0x80,
+            .target_pgn = pgn_diagnostic_message_1,
+            .data = &payload,
+        };
+
+    const message =
+        MessageView.fromBam(completed);
+
+    try std.testing.expectEqual(
+        @as(u32, pgn_diagnostic_message_1),
+        message.pgn(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x80),
+        message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        MessageDelivery.bam,
+        message.delivery(),
+    );
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &payload,
+        message.data(),
+    );
 }
