@@ -3,6 +3,9 @@ const std = @import("std");
 const j1587 = @import("j1587.zig");
 const j1939 = @import("j1939.zig");
 
+const isotp = @import("isotp.zig");
+const uds = @import("uds.zig");
+
 const can = @import("can.zig");
 const capture_text = @import("capture_text.zig");
 const frame_recovery = @import("frame_recovery.zig");
@@ -48,6 +51,99 @@ pub const EndpointObservation = struct {
     endpoint: EndpointKey,
     evidence: Evidence,
 };
+/// Borrowed UDS data-identifier evidence with the ISO-TP route on which it
+/// was observed.
+///
+/// The source/destination bytes are capture-local routing evidence. This does
+/// not establish controller, component, vehicle, or physical-device identity.
+pub const UdsDataIdentifierEvidence = struct {
+    source_address: u8,
+    destination_address: u8,
+    delivery: isotp.MessageDelivery,
+
+    data_identifier: u16,
+    data_after_identifier: []const u8,
+};
+
+/// Exact equality between an original J1939 Component Identification payload
+/// and the bytes following a UDS data identifier.
+///
+/// This records a byte-for-byte relationship only. It does not assert that
+/// the DID means J1939 Component Identification or that the two protocol
+/// addresses identify the same physical controller.
+pub const J1939UdsExactPayloadMatch = struct {
+    j1939_source_address: u8,
+    j1939_delivery: j1939.MessageDelivery,
+
+    uds_source_address: u8,
+    uds_destination_address: u8,
+    uds_delivery: isotp.MessageDelivery,
+
+    data_identifier: u16,
+    byte_length: usize,
+};
+
+pub fn matchJ1939ComponentPayloadToUdsDataIdentifier(
+    component: j1939.ComponentIdentificationObservation,
+    uds_evidence: UdsDataIdentifierEvidence,
+) ?J1939UdsExactPayloadMatch {
+    const raw_payload =
+        component.raw_payload orelse
+        return null;
+
+    if (!std.mem.eql(
+        u8,
+        raw_payload,
+        uds_evidence.data_after_identifier,
+    )) {
+        return null;
+    }
+
+    return .{
+        .j1939_source_address = component.source_address,
+        .j1939_delivery = component.delivery,
+
+        .uds_source_address = uds_evidence.source_address,
+        .uds_destination_address = uds_evidence.destination_address,
+        .uds_delivery = uds_evidence.delivery,
+
+        .data_identifier = uds_evidence.data_identifier,
+        .byte_length = raw_payload.len,
+    };
+}
+
+pub const UdsDataIdentifierEvidenceError =
+    uds.ParseError ||
+    uds.ReadDataByIdentifierParseError;
+
+pub fn fromUdsReadDataByIdentifierResponse(
+    routed: isotp.RoutedMessage,
+) UdsDataIdentifierEvidenceError!?UdsDataIdentifierEvidence {
+    const message =
+        try uds.parse(
+            routed.payload,
+        );
+
+    const service = switch (message) {
+        .service => |value| value,
+        .negative_response => return null,
+    };
+
+    const response =
+        (try uds.parseReadDataByIdentifierResponse(
+            service,
+        )) orelse
+        return null;
+
+    return .{
+        .source_address = routed.source_address,
+        .destination_address = routed.destination_address,
+        .delivery = routed.delivery,
+
+        .data_identifier = response.data_identifier,
+        .data_after_identifier = response.data_after_identifier,
+    };
+}
 pub const IdentityStorageError = error{
     IdentityCapacityExceeded,
 };
@@ -2190,4 +2286,243 @@ test "authentic J1939 capture fragment builds participant correlation" {
 
         else => return error.TestUnexpectedResult,
     }
+}
+test "UDS DID evidence preserves observed route and response bytes" {
+    const payload = [_]u8{
+        0x62, 0xf1, 0x57,
+        0x44, 0x54, 0x44,
+        0x53, 0x43, 0x2a,
+        0x34, 0x37, 0x31,
+        0x4e, 0x31, 0x30,
+        0x2a, 0x53, 0x30,
+        0x30, 0x36, 0x36,
+        0x39, 0x35, 0x31,
+        0x2a, 0x36, 0x31,
+        0x31, 0x30, 0x33,
+        0x35, 0x00, 0x00,
+        0x00, 0x00, 0x2a,
+    };
+
+    const routed: isotp.RoutedMessage = .{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .payload = &payload,
+        .delivery = .multi_frame,
+    };
+
+    const evidence =
+        (try fromUdsReadDataByIdentifierResponse(
+            routed,
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        evidence.source_address,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0xf1),
+        evidence.destination_address,
+    );
+
+    try std.testing.expectEqual(
+        isotp.MessageDelivery.multi_frame,
+        evidence.delivery,
+    );
+
+    try std.testing.expectEqual(
+        @as(u16, 0xf157),
+        evidence.data_identifier,
+    );
+
+    try std.testing.expectEqualSlices(
+        u8,
+        payload[3..],
+        evidence.data_after_identifier,
+    );
+}
+
+test "matches authentic J1939 component payload to UDS DID bytes exactly" {
+    const payload = [_]u8{
+        0x44, 0x54, 0x44, 0x53, 0x43, 0x2a, 0x34,
+        0x37, 0x31, 0x4e, 0x31, 0x30, 0x2a, 0x53,
+        0x30, 0x30, 0x36, 0x36, 0x39, 0x35, 0x31,
+        0x2a, 0x36, 0x31, 0x31, 0x30, 0x33, 0x35,
+        0x00, 0x00, 0x00, 0x00, 0x2a,
+    };
+
+    const component: j1939.ComponentIdentificationObservation =
+        .{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "DTDSC",
+            .model = "471N10",
+            .serial_number = "S0066951",
+            .unit_number = payload[22..32],
+            .raw_payload = &payload,
+        };
+
+    const uds_evidence: UdsDataIdentifierEvidence =
+        .{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf157,
+            .data_after_identifier = &payload,
+        };
+
+    const match =
+        matchJ1939ComponentPayloadToUdsDataIdentifier(
+            component,
+            uds_evidence,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        match.j1939_source_address,
+    );
+
+    try std.testing.expectEqual(
+        j1939.MessageDelivery.rts_cts,
+        match.j1939_delivery,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        match.uds_source_address,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0xf1),
+        match.uds_destination_address,
+    );
+
+    try std.testing.expectEqual(
+        isotp.MessageDelivery.multi_frame,
+        match.uds_delivery,
+    );
+
+    try std.testing.expectEqual(
+        @as(u16, 0xf157),
+        match.data_identifier,
+    );
+
+    try std.testing.expectEqual(
+        payload.len,
+        match.byte_length,
+    );
+}
+
+test "component payload match rejects different UDS bytes" {
+    const j1939_payload = [_]u8{
+        'A', '*', 'B', '*', 'C', '*', 'D', '*',
+    };
+
+    const uds_payload = [_]u8{
+        'A', '*', 'B', '*', 'C', '*', 'X', '*',
+    };
+
+    const component: j1939.ComponentIdentificationObservation =
+        .{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "A",
+            .model = "B",
+            .serial_number = "C",
+            .unit_number = "D",
+            .raw_payload = &j1939_payload,
+        };
+
+    const uds_evidence: UdsDataIdentifierEvidence =
+        .{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .single_frame,
+            .data_identifier = 0x1234,
+            .data_after_identifier = &uds_payload,
+        };
+
+    try std.testing.expect(
+        matchJ1939ComponentPayloadToUdsDataIdentifier(
+            component,
+            uds_evidence,
+        ) == null,
+    );
+}
+
+test "component payload match requires original J1939 payload evidence" {
+    const uds_payload = [_]u8{
+        'A', '*', 'B', '*', 'C', '*', 'D', '*',
+    };
+
+    const component: j1939.ComponentIdentificationObservation =
+        .{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "A",
+            .model = "B",
+            .serial_number = "C",
+            .unit_number = "D",
+        };
+
+    const uds_evidence: UdsDataIdentifierEvidence =
+        .{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .single_frame,
+            .data_identifier = 0x1234,
+            .data_after_identifier = &uds_payload,
+        };
+
+    try std.testing.expect(
+        matchJ1939ComponentPayloadToUdsDataIdentifier(
+            component,
+            uds_evidence,
+        ) == null,
+    );
+}
+
+test "component payload match does not require protocol address equality" {
+    const payload = [_]u8{
+        'A', '*', 'B', '*', 'C', '*', 'D', '*',
+    };
+
+    const component: j1939.ComponentIdentificationObservation =
+        .{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "A",
+            .model = "B",
+            .serial_number = "C",
+            .unit_number = "D",
+            .raw_payload = &payload,
+        };
+
+    const uds_evidence: UdsDataIdentifierEvidence =
+        .{
+            .source_address = 0x7a,
+            .destination_address = 0xf1,
+            .delivery = .single_frame,
+            .data_identifier = 0x1234,
+            .data_after_identifier = &payload,
+        };
+
+    const match =
+        matchJ1939ComponentPayloadToUdsDataIdentifier(
+            component,
+            uds_evidence,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        match.j1939_source_address,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x7a),
+        match.uds_source_address,
+    );
 }
