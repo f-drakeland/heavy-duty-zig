@@ -292,6 +292,7 @@ pub const FrameView = struct {
 pub const MessageView = struct {
     pgn_value: u32,
     source_address_value: u8,
+    destination_address_value: ?u8,
     payload: []const u8,
     delivery_method: MessageDelivery,
 
@@ -301,6 +302,7 @@ pub const MessageView = struct {
         return .{
             .pgn_value = frame.identifier_info.pgn,
             .source_address_value = frame.identifier_info.source_address,
+            .destination_address_value = frame.identifier_info.destination_address,
             .payload = frame.data(),
             .delivery_method = .single_frame,
         };
@@ -312,6 +314,7 @@ pub const MessageView = struct {
         return .{
             .pgn_value = completed.target_pgn,
             .source_address_value = completed.source_address,
+            .destination_address_value = 0xff,
             .payload = completed.data,
             .delivery_method = .bam,
         };
@@ -319,10 +322,12 @@ pub const MessageView = struct {
 
     pub fn fromRtsCts(
         completed: transport.reassembly.CompletedMessage,
+        destination_address: u8,
     ) MessageView {
         return .{
             .pgn_value = completed.target_pgn,
             .source_address_value = completed.source_address,
+            .destination_address_value = destination_address,
             .payload = completed.data,
             .delivery_method = .rts_cts,
         };
@@ -334,6 +339,18 @@ pub const MessageView = struct {
 
     pub fn sourceAddress(self: MessageView) u8 {
         return self.source_address_value;
+    }
+
+    /// Returns the destination address observed for message delivery.
+    ///
+    /// For a single-frame PDU1 message, this is the identifier destination.
+    /// For a single-frame PDU2 message, there is no destination and this is null.
+    /// For BAM, this is the transport broadcast destination 0xff.
+    /// For RTS/CTS, this is the directed transport destination.
+    pub fn destinationAddress(
+        self: MessageView,
+    ) ?u8 {
+        return self.destination_address_value;
     }
 
     pub fn data(self: MessageView) []const u8 {
@@ -593,7 +610,12 @@ pub fn MessageAssembler(
 
                         const logical_message = switch (delivery) {
                             .bam => MessageView.fromBam(message),
-                            .rts_cts => MessageView.fromRtsCts(message),
+
+                            .rts_cts => MessageView.fromRtsCts(
+                                message,
+                                destination_address,
+                            ),
+
                             .single_frame => unreachable,
                         };
 
@@ -1162,6 +1184,11 @@ test "logical message view accepts single-frame J1939 payload" {
     );
 
     try std.testing.expectEqual(
+        @as(?u8, null),
+        message.destinationAddress(),
+    );
+
+    try std.testing.expectEqual(
         MessageDelivery.single_frame,
         message.delivery(),
     );
@@ -1170,6 +1197,53 @@ test "logical message view accepts single-frame J1939 payload" {
         u8,
         &payload,
         message.data(),
+    );
+}
+
+test "logical message view preserves single-frame PDU1 destination" {
+    const payload = [_]u8{
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+        0x08,
+    };
+
+    const can_frame =
+        try can.FrameView.fromParts(
+            0x18ea0080,
+            .extended,
+            .data,
+            8,
+            &payload,
+        );
+
+    const frame =
+        try FrameView.fromCanFrame(
+            can_frame,
+        );
+
+    const message =
+        MessageView.fromSingleFrame(
+            frame,
+        );
+
+    try std.testing.expectEqual(
+        @as(u32, 0x00ea00),
+        message.pgn(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x80),
+        message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        @as(?u8, 0x00),
+        message.destinationAddress(),
     );
 }
 
@@ -1200,6 +1274,11 @@ test "logical message view accepts BAM-reassembled payload" {
     try std.testing.expectEqual(
         @as(u32, pgn_diagnostic_message_1),
         message.pgn(),
+    );
+
+    try std.testing.expectEqual(
+        @as(?u8, 0xff),
+        message.destinationAddress(),
     );
 
     try std.testing.expectEqual(
@@ -2043,6 +2122,11 @@ test "message assembler reconstructs authentic RTS CTS component identification 
     try std.testing.expectEqual(
         @as(u8, 0x00),
         message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        @as(?u8, 0xf9),
+        message.destinationAddress(),
     );
 
     try std.testing.expectEqual(

@@ -9,6 +9,62 @@ const correlation = @import("correlation.zig");
 const max_capture_bytes =
     64 * 1024 * 1024;
 
+const pgn_inventory_capacity = 4096;
+
+const PgnInventoryError = error{
+    PgnInventoryCapacityExceeded,
+};
+
+const PgnInventory = struct {
+    const Entry = struct {
+        occupied: bool = false,
+        source_address: u8 = 0,
+        destination_address: ?u8 = null,
+        pgn: u32 = 0,
+        message_count: usize = 0,
+    };
+
+    entries: [pgn_inventory_capacity]Entry =
+        @splat(.{}),
+
+    entry_count: usize = 0,
+
+    fn observe(
+        self: *PgnInventory,
+        source_address: u8,
+        destination_address: ?u8,
+        pgn: u32,
+    ) PgnInventoryError!void {
+        for (&self.entries) |*entry| {
+            if (entry.occupied and
+                entry.source_address == source_address and
+                entry.destination_address == destination_address and
+                entry.pgn == pgn)
+            {
+                entry.message_count += 1;
+                return;
+            }
+        }
+
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) {
+                entry.* = .{
+                    .occupied = true,
+                    .source_address = source_address,
+                    .destination_address = destination_address,
+                    .pgn = pgn,
+                    .message_count = 1,
+                };
+
+                self.entry_count += 1;
+                return;
+            }
+        }
+
+        return error.PgnInventoryCapacityExceeded;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
@@ -48,6 +104,8 @@ pub fn main(init: std.process.Init) !void {
 
     var typed_observations: usize = 0;
     var unsupported_pgn_messages: usize = 0;
+
+    var pgn_inventory = PgnInventory{};
 
     var assembler =
         j1939.MessageAssembler(
@@ -157,6 +215,18 @@ pub fn main(init: std.process.Init) !void {
         switch (assembly_event) {
             .message => |message| {
                 messages += 1;
+
+                pgn_inventory.observe(
+                    message.sourceAddress(),
+                    message.destinationAddress(),
+                    message.pgn(),
+                ) catch |err| {
+                    std.debug.print(
+                        "PGN inventory error: {s}\n",
+                        .{@errorName(err)},
+                    );
+                    return;
+                };
 
                 var cursor =
                     j1939.MessageCursor.init(
@@ -280,6 +350,33 @@ pub fn main(init: std.process.Init) !void {
                         endpoint.identity_evidence_count,
                     },
                 );
+
+                for (pgn_inventory.entries) |entry| {
+                    if (!entry.occupied or
+                        entry.source_address != source_address)
+                    {
+                        continue;
+                    }
+
+                    if (entry.destination_address) |destination_address| {
+                        std.debug.print(
+                            "  PGN 0x{X:0>6} -> delivery DA {X:0>2}: {} messages\n",
+                            .{
+                                entry.pgn,
+                                destination_address,
+                                entry.message_count,
+                            },
+                        );
+                    } else {
+                        std.debug.print(
+                            "  PGN 0x{X:0>6} -> PDU2: {} messages\n",
+                            .{
+                                entry.pgn,
+                                entry.message_count,
+                            },
+                        );
+                    }
+                }
             },
 
             .j1587_mid => |mid| {
