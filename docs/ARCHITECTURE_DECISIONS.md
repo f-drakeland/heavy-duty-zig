@@ -769,16 +769,62 @@ supporting the relationship can be preserved explicitly.
 
 ---
 
+## AD-022 — Durable value relationships reference durable evidence values
+
+**Status:** Accepted
+
+### Decision
+
+Correlation-capable evidence that must survive parser or reassembly lifetimes is
+copied into capture-local durable evidence storage.
+
+Distinct durable evidence values receive capture-local evidence-value identifiers.
+Relationships refer to those evidence values and preserve the reason for the
+association rather than referring directly to protocol endpoints or creating a
+controller or physical ECU identity.
+
+Exact repeated evidence may resolve to the same durable evidence value while
+retaining an occurrence count. Equal payload bytes observed with different protocol
+metadata remain distinct evidence values and may be related explicitly.
+
+### Why
+
+Borrowed observation payloads are not sufficient for relationships that must survive
+the parser or transport-reassembly storage that produced them.
+
+Protocol endpoint addresses are also not suitable relationship identities because
+they are protocol-specific capture evidence rather than permanent device identity.
+
+Durable evidence values provide stable capture-local references to the exact evidence
+that justified a relationship while keeping the original protocol metadata intact.
+
+### Consequence
+
+Value-level relationships can be preserved and queried across the capture lifetime
+without merging protocol endpoints or promoting the relationship into a physical
+identity claim.
+
+Evidence-value identifiers remain meaningful only within the capture-local evidence
+inventory that produced them.
+
+This decision does not establish occurrence-level provenance or temporal
+relationships between repeated observations.
+
+---
+
 # Open architecture questions
 
-How should HDZ preserve and query durable capture-level relationships between
-observations while retaining the evidence that justified each association and
-without prematurely creating controller or physical ECU identity?
+How should HDZ preserve occurrence-level provenance for logical observations,
+especially observations assembled from multiple capture records, so future temporal,
+request/response, and sequence relationships can refer to specific occurrences
+without conflating occurrence identity with distinct evidence-value identity?
 
-The current J1939/UDS exact-payload matcher demonstrates that such relationships can
-be discovered. The unresolved question is how those relationships should be
-owned across the capture lifetime, represented without losing provenance, and
-exposed to higher-level diagnostic code.
+Current durable evidence storage intentionally collapses exact repeated values while
+retaining an occurrence count. J1939 and ISO-TP reassembly do not yet carry complete
+source-record, line, or timestamp provenance into the resulting logical message.
+
+That provenance problem should be resolved before HDZ introduces durable
+occurrence-level or temporal relationships.
 
 ---
 
