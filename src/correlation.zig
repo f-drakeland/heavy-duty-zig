@@ -65,6 +65,147 @@ pub const UdsDataIdentifierEvidence = struct {
     data_after_identifier: []const u8,
 };
 
+pub const CorrelationStorageError = error{
+    CorrelationPayloadCapacityExceeded,
+};
+
+fn OwnedBytes(comptime capacity: usize) type {
+    if (capacity == 0) {
+        @compileError(
+            "owned correlation payload capacity must be greater than zero",
+        );
+    }
+
+    return struct {
+        const Self = @This();
+
+        storage: [capacity]u8 = undefined,
+        len: usize = 0,
+
+        pub fn fromSlice(
+            source: []const u8,
+        ) CorrelationStorageError!Self {
+            if (source.len > capacity) {
+                return error.CorrelationPayloadCapacityExceeded;
+            }
+
+            var result: Self = .{};
+            @memcpy(result.storage[0..source.len], source);
+            result.len = source.len;
+
+            return result;
+        }
+
+        pub fn bytes(
+            self: *const Self,
+        ) []const u8 {
+            return self.storage[0..self.len];
+        }
+
+        pub fn eql(
+            self: *const Self,
+            other: *const Self,
+        ) bool {
+            return std.mem.eql(
+                u8,
+                self.bytes(),
+                other.bytes(),
+            );
+        }
+    };
+}
+
+/// Durable protocol evidence capable of participating in correlation.
+///
+/// This owns the exact bytes used for correlation while preserving the
+/// protocol-local metadata under which those bytes were observed. It does not
+/// assert controller, component, vehicle, or physical-device identity.
+pub fn OwnedCorrelationEvidence(
+    comptime payload_capacity: usize,
+) type {
+    const Payload = OwnedBytes(payload_capacity);
+
+    return union(enum) {
+        const Self = @This();
+
+        pub const J1939ComponentIdentificationPayload = struct {
+            source_address: u8,
+            delivery: j1939.MessageDelivery,
+            payload: Payload,
+        };
+
+        pub const UdsDataIdentifierResponse = struct {
+            source_address: u8,
+            destination_address: u8,
+            delivery: isotp.MessageDelivery,
+            data_identifier: u16,
+            data_after_identifier: Payload,
+        };
+
+        j1939_component_identification_payload: J1939ComponentIdentificationPayload,
+        uds_data_identifier_response: UdsDataIdentifierResponse,
+
+        pub fn fromJ1939ComponentIdentification(
+            observation: j1939.ComponentIdentificationObservation,
+        ) CorrelationStorageError!?Self {
+            const raw_payload =
+                observation.raw_payload orelse
+                return null;
+
+            return .{
+                .j1939_component_identification_payload = .{
+                    .source_address = observation.source_address,
+                    .delivery = observation.delivery,
+                    .payload = try Payload.fromSlice(raw_payload),
+                },
+            };
+        }
+
+        pub fn fromUdsDataIdentifier(
+            evidence: UdsDataIdentifierEvidence,
+        ) CorrelationStorageError!Self {
+            return .{
+                .uds_data_identifier_response = .{
+                    .source_address = evidence.source_address,
+                    .destination_address = evidence.destination_address,
+                    .delivery = evidence.delivery,
+                    .data_identifier = evidence.data_identifier,
+                    .data_after_identifier = try Payload.fromSlice(
+                        evidence.data_after_identifier,
+                    ),
+                },
+            };
+        }
+
+        pub fn eqlExact(
+            self: *const Self,
+            other: *const Self,
+        ) bool {
+            return switch (self.*) {
+                .j1939_component_identification_payload => |value| switch (other.*) {
+                    .j1939_component_identification_payload => |other_value| value.source_address == other_value.source_address and
+                        value.delivery == other_value.delivery and
+                        value.payload.eql(&other_value.payload),
+
+                    else => false,
+                },
+
+                .uds_data_identifier_response => |value| switch (other.*) {
+                    .uds_data_identifier_response => |other_value| value.source_address == other_value.source_address and
+                        value.destination_address == other_value.destination_address and
+                        value.delivery == other_value.delivery and
+                        value.data_identifier == other_value.data_identifier and
+                        value.data_after_identifier.eql(
+                            &other_value.data_after_identifier,
+                        ),
+
+                    else => false,
+                },
+            };
+        }
+    };
+}
+
 /// Exact equality between an original J1939 Component Identification payload
 /// and the bytes following a UDS data identifier.
 ///
@@ -920,6 +1061,192 @@ pub fn fromJ1939(
             .j1939 = observation,
         },
     };
+}
+
+test "owned correlation bytes preserve exact payload" {
+    const Owned = OwnedBytes(4);
+
+    const first = try Owned.fromSlice(&.{ 0x11, 0x22, 0x00, 0xff });
+    const same = try Owned.fromSlice(&.{ 0x11, 0x22, 0x00, 0xff });
+    const different = try Owned.fromSlice(&.{ 0x11, 0x22, 0x00, 0xfe });
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x11, 0x22, 0x00, 0xff },
+        first.bytes(),
+    );
+    try std.testing.expect(first.eql(&same));
+    try std.testing.expect(!first.eql(&different));
+
+    try std.testing.expectError(
+        error.CorrelationPayloadCapacityExceeded,
+        Owned.fromSlice(&.{ 1, 2, 3, 4, 5 }),
+    );
+}
+
+test "owned correlation evidence preserves protocol metadata and exact bytes" {
+    const Owned = OwnedCorrelationEvidence(4);
+
+    var j1939_payload = [_]u8{ 0x11, 0x22, 0x00, 0xff };
+
+    const j1939_owned =
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "MAKE",
+            .model = "MODEL",
+            .serial_number = "SERIAL",
+            .unit_number = "UNIT",
+            .raw_payload = j1939_payload[0..],
+        })).?;
+
+    j1939_payload[0] = 0xaa;
+
+    switch (j1939_owned) {
+        .j1939_component_identification_payload => |value| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                value.source_address,
+            );
+            try std.testing.expectEqual(
+                j1939.MessageDelivery.rts_cts,
+                value.delivery,
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &.{ 0x11, 0x22, 0x00, 0xff },
+                value.payload.bytes(),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const uds_owned = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf157,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    switch (uds_owned) {
+        .uds_data_identifier_response => |value| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                value.source_address,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 0xf1),
+                value.destination_address,
+            );
+            try std.testing.expectEqual(
+                isotp.MessageDelivery.multi_frame,
+                value.delivery,
+            );
+            try std.testing.expectEqual(
+                @as(u16, 0xf157),
+                value.data_identifier,
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &.{ 0x11, 0x22, 0x00, 0xff },
+                value.data_after_identifier.bytes(),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const missing_raw =
+        try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "MAKE",
+            .model = "MODEL",
+            .serial_number = "SERIAL",
+            .unit_number = "UNIT",
+        });
+
+    try std.testing.expect(missing_raw == null);
+}
+
+test "owned correlation evidence exact equality includes protocol metadata" {
+    const Owned = OwnedCorrelationEvidence(4);
+
+    const j1939_first =
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?;
+
+    const j1939_same =
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?;
+
+    const j1939_other_delivery =
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .bam,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?;
+
+    try std.testing.expect(
+        j1939_first.eqlExact(&j1939_same),
+    );
+    try std.testing.expect(
+        !j1939_first.eqlExact(&j1939_other_delivery),
+    );
+
+    const uds_first = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf157,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    const uds_same = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf157,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    const uds_other_did = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf158,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    try std.testing.expect(
+        uds_first.eqlExact(&uds_same),
+    );
+    try std.testing.expect(
+        !uds_first.eqlExact(&uds_other_did),
+    );
+    try std.testing.expect(
+        !j1939_first.eqlExact(&uds_first),
+    );
 }
 
 test "J1587 observation retains MID endpoint" {
