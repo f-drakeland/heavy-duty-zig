@@ -48,7 +48,200 @@ pub const EndpointObservation = struct {
     endpoint: EndpointKey,
     evidence: Evidence,
 };
+pub const IdentityStorageError = error{
+    IdentityCapacityExceeded,
+};
 
+fn OwnedTextFields(
+    comptime capacity: usize,
+    comptime field_count: usize,
+) type {
+    if (capacity == 0) {
+        @compileError(
+            "owned text capacity must be greater than zero",
+        );
+    }
+
+    if (field_count == 0) {
+        @compileError(
+            "owned text field count must be greater than zero",
+        );
+    }
+
+    return struct {
+        const Self = @This();
+
+        storage: [capacity]u8 = undefined,
+        offsets: [field_count + 1]usize =
+            @splat(0),
+        len: usize = 0,
+
+        pub fn fromSlices(
+            fields: [field_count][]const u8,
+        ) IdentityStorageError!Self {
+            var result: Self = .{};
+
+            for (fields, 0..) |field_bytes, index| {
+                if (field_bytes.len > capacity - result.len) {
+                    return error.IdentityCapacityExceeded;
+                }
+
+                @memcpy(
+                    result.storage[result.len .. result.len + field_bytes.len],
+                    field_bytes,
+                );
+
+                result.len += field_bytes.len;
+                result.offsets[index + 1] =
+                    result.len;
+            }
+
+            return result;
+        }
+
+        pub fn field(
+            self: *const Self,
+            comptime index: usize,
+        ) []const u8 {
+            if (index >= field_count) {
+                @compileError(
+                    "owned text field index out of bounds",
+                );
+            }
+
+            return self.storage[self.offsets[index]..self.offsets[index + 1]];
+        }
+    };
+}
+
+/// Durable copy of identity-bearing protocol evidence.
+///
+/// This preserves what a protocol endpoint reported. It does not establish
+/// permanent controller, component, vehicle, or physical ECU identity.
+pub fn OwnedIdentityObservation(
+    comptime text_capacity: usize,
+) type {
+    const Text1 =
+        OwnedTextFields(text_capacity, 1);
+
+    const Text3 =
+        OwnedTextFields(text_capacity, 3);
+
+    const Text4 =
+        OwnedTextFields(text_capacity, 4);
+
+    return struct {
+        const Self = @This();
+
+        pub const J1587ComponentIdentification = struct {
+            component_mid: u8,
+            fields: Text3,
+        };
+
+        pub const J1939AddressClaim = struct {
+            delivery: j1939.MessageDelivery,
+            name: j1939.address_claim.Name,
+        };
+
+        pub const J1939ComponentIdentification = struct {
+            delivery: j1939.MessageDelivery,
+            fields: Text4,
+        };
+
+        pub const IdentityEvidence = union(enum) {
+            j1587_software_identification: Text1,
+            j1587_vin: Text1,
+            j1587_component_identification: J1587ComponentIdentification,
+
+            j1939_address_claim: J1939AddressClaim,
+
+            j1939_component_identification: J1939ComponentIdentification,
+        };
+
+        endpoint: EndpointKey,
+        evidence: IdentityEvidence,
+
+        pub fn fromEndpointObservation(
+            observation: EndpointObservation,
+        ) IdentityStorageError!?Self {
+            return switch (observation.evidence) {
+                .j1587 => |evidence| switch (evidence) {
+                    .software_identification => |value| .{
+                        .endpoint = observation.endpoint,
+                        .evidence = .{
+                            .j1587_software_identification = try Text1.fromSlices(.{
+                                value.value,
+                            }),
+                        },
+                    },
+
+                    .vin => |value| .{
+                        .endpoint = observation.endpoint,
+                        .evidence = .{
+                            .j1587_vin = try Text1.fromSlices(.{
+                                value.value,
+                            }),
+                        },
+                    },
+
+                    .component_identification => |value| .{
+                        .endpoint = observation.endpoint,
+                        .evidence = .{
+                            .j1587_component_identification = .{
+                                .component_mid = value.component_mid,
+                                .fields = try Text3.fromSlices(.{
+                                    value.manufacturer,
+                                    value.model_name,
+                                    value.serial,
+                                }),
+                            },
+                        },
+                    },
+
+                    .vehicle_distance,
+                    .road_speed,
+                    .accelerator_pedal_position,
+                    .engine_load,
+                    .engine_speed,
+                    .diagnostic_code,
+                    => null,
+                },
+
+                .j1939 => |evidence| switch (evidence) {
+                    .address_claim => |value| .{
+                        .endpoint = observation.endpoint,
+                        .evidence = .{
+                            .j1939_address_claim = .{
+                                .delivery = value.delivery,
+                                .name = value.name,
+                            },
+                        },
+                    },
+
+                    .component_identification => |value| .{
+                        .endpoint = observation.endpoint,
+                        .evidence = .{
+                            .j1939_component_identification = .{
+                                .delivery = value.delivery,
+                                .fields = try Text4.fromSlices(.{
+                                    value.make,
+                                    value.model,
+                                    value.serial_number,
+                                    value.unit_number,
+                                }),
+                            },
+                        },
+                    },
+
+                    .eec1_engine_speed,
+                    .dm1_lamps,
+                    .dm1_diagnostic_trouble_code,
+                    => null,
+                },
+            };
+        }
+    };
+}
 pub const EndpointSummary = struct {
     key: EndpointKey,
     observation_count: usize,
@@ -627,5 +820,127 @@ test "inventory reports endpoint capacity exhaustion" {
     try std.testing.expectError(
         error.EndpointCapacityExceeded,
         inventory.observe(second),
+    );
+}
+
+test "owned identity observation copies borrowed J1587 software evidence" {
+    var software_bytes = [_]u8{
+        'S', 'W', '-', '2', '.', '1',
+    };
+
+    const observation = fromJ1587(.{
+        .software_identification = .{
+            .source_mid = 128,
+            .value = &software_bytes,
+        },
+    });
+
+    const Owned =
+        OwnedIdentityObservation(16);
+
+    const owned =
+        (try Owned.fromEndpointObservation(
+            observation,
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    software_bytes[0] = 'X';
+
+    switch (owned.evidence) {
+        .j1587_software_identification => |software| {
+            try std.testing.expectEqualStrings(
+                "SW-2.1",
+                software.field(0),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "owned J1939 component evidence preserves field boundaries" {
+    const observation = fromJ1939(.{
+        .component_identification = .{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "DTDSC",
+            .model = "471N10",
+            .serial_number = "S0066951",
+            .unit_number = "611035",
+        },
+    });
+
+    const Owned =
+        OwnedIdentityObservation(32);
+
+    const owned =
+        (try Owned.fromEndpointObservation(
+            observation,
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    switch (owned.evidence) {
+        .j1939_component_identification => |component| {
+            try std.testing.expectEqualStrings(
+                "DTDSC",
+                component.fields.field(0),
+            );
+
+            try std.testing.expectEqualStrings(
+                "471N10",
+                component.fields.field(1),
+            );
+
+            try std.testing.expectEqualStrings(
+                "S0066951",
+                component.fields.field(2),
+            );
+
+            try std.testing.expectEqualStrings(
+                "611035",
+                component.fields.field(3),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "owned identity evidence reports capacity exhaustion" {
+    const observation = fromJ1587(.{
+        .software_identification = .{
+            .source_mid = 128,
+            .value = "SW-2.1",
+        },
+    });
+
+    const Owned =
+        OwnedIdentityObservation(4);
+
+    try std.testing.expectError(
+        error.IdentityCapacityExceeded,
+        Owned.fromEndpointObservation(
+            observation,
+        ),
+    );
+}
+
+test "non-identity observation produces no owned identity evidence" {
+    const observation = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x00,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    const Owned =
+        OwnedIdentityObservation(32);
+
+    try std.testing.expect(
+        (try Owned.fromEndpointObservation(
+            observation,
+        )) == null,
     );
 }
