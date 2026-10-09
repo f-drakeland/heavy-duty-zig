@@ -99,6 +99,29 @@ fn OwnedTextFields(
             return result;
         }
 
+        pub fn eql(
+            self: *const Self,
+            other: *const Self,
+        ) bool {
+            if (self.len != other.len) {
+                return false;
+            }
+
+            if (!std.mem.eql(
+                u8,
+                self.storage[0..self.len],
+                other.storage[0..other.len],
+            )) {
+                return false;
+            }
+
+            return std.mem.eql(
+                usize,
+                self.offsets[0..],
+                other.offsets[0..],
+            );
+        }
+
         pub fn field(
             self: *const Self,
             comptime index: usize,
@@ -160,6 +183,49 @@ pub fn OwnedIdentityObservation(
 
         endpoint: EndpointKey,
         evidence: IdentityEvidence,
+        pub fn eqlExact(
+            self: *const Self,
+            other: *const Self,
+        ) bool {
+            if (!self.endpoint.eql(other.endpoint)) {
+                return false;
+            }
+
+            return switch (self.evidence) {
+                .j1587_software_identification => |value| switch (other.evidence) {
+                    .j1587_software_identification => |other_value| value.eql(&other_value),
+
+                    else => false,
+                },
+
+                .j1587_vin => |value| switch (other.evidence) {
+                    .j1587_vin => |other_value| value.eql(&other_value),
+
+                    else => false,
+                },
+
+                .j1587_component_identification => |value| switch (other.evidence) {
+                    .j1587_component_identification => |other_value| value.component_mid == other_value.component_mid and
+                        value.fields.eql(&other_value.fields),
+
+                    else => false,
+                },
+
+                .j1939_address_claim => |value| switch (other.evidence) {
+                    .j1939_address_claim => |other_value| value.delivery == other_value.delivery and
+                        value.name.raw == other_value.name.raw,
+
+                    else => false,
+                },
+
+                .j1939_component_identification => |value| switch (other.evidence) {
+                    .j1939_component_identification => |other_value| value.delivery == other_value.delivery and
+                        value.fields.eql(&other_value.fields),
+
+                    else => false,
+                },
+            };
+        }
 
         pub fn fromEndpointObservation(
             observation: EndpointObservation,
@@ -942,5 +1008,145 @@ test "non-identity observation produces no owned identity evidence" {
         (try Owned.fromEndpointObservation(
             observation,
         )) == null,
+    );
+}
+
+test "owned identity exact equality compares copied contents" {
+    const Owned =
+        OwnedIdentityObservation(32);
+
+    const first =
+        (try Owned.fromEndpointObservation(
+            fromJ1587(.{
+                .software_identification = .{
+                    .source_mid = 128,
+                    .value = "SW-2.1",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    const second =
+        (try Owned.fromEndpointObservation(
+            fromJ1587(.{
+                .software_identification = .{
+                    .source_mid = 128,
+                    .value = "SW-2.1",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        first.eqlExact(&second),
+    );
+}
+
+test "owned identity exact equality includes endpoint" {
+    const Owned =
+        OwnedIdentityObservation(32);
+
+    const first =
+        (try Owned.fromEndpointObservation(
+            fromJ1587(.{
+                .software_identification = .{
+                    .source_mid = 128,
+                    .value = "SW-2.1",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    const second =
+        (try Owned.fromEndpointObservation(
+            fromJ1587(.{
+                .software_identification = .{
+                    .source_mid = 129,
+                    .value = "SW-2.1",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        !first.eqlExact(&second),
+    );
+}
+
+test "owned identity exact equality preserves component field boundaries" {
+    const Owned =
+        OwnedIdentityObservation(32);
+
+    const first =
+        (try Owned.fromEndpointObservation(
+            fromJ1939(.{
+                .component_identification = .{
+                    .source_address = 0x00,
+                    .delivery = .rts_cts,
+                    .make = "AB",
+                    .model = "C",
+                    .serial_number = "D",
+                    .unit_number = "E",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    const second =
+        (try Owned.fromEndpointObservation(
+            fromJ1939(.{
+                .component_identification = .{
+                    .source_address = 0x00,
+                    .delivery = .rts_cts,
+                    .make = "A",
+                    .model = "BC",
+                    .serial_number = "D",
+                    .unit_number = "E",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        !first.eqlExact(&second),
+    );
+}
+
+test "owned identity exact equality includes delivery evidence" {
+    const Owned =
+        OwnedIdentityObservation(32);
+
+    const first =
+        (try Owned.fromEndpointObservation(
+            fromJ1939(.{
+                .component_identification = .{
+                    .source_address = 0x00,
+                    .delivery = .bam,
+                    .make = "DTDSC",
+                    .model = "471N10",
+                    .serial_number = "S0066951",
+                    .unit_number = "611035",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    const second =
+        (try Owned.fromEndpointObservation(
+            fromJ1939(.{
+                .component_identification = .{
+                    .source_address = 0x00,
+                    .delivery = .rts_cts,
+                    .make = "DTDSC",
+                    .model = "471N10",
+                    .serial_number = "S0066951",
+                    .unit_number = "611035",
+                },
+            }),
+        )) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        !first.eqlExact(&second),
     );
 }
