@@ -203,6 +203,12 @@ pub fn Reassembler(
         bytes_written: usize = 0,
         next_sequence_number: u8 = 1,
 
+        pub fn isActive(
+            self: *const Self,
+        ) bool {
+            return self.active;
+        }
+
         pub fn reset(
             self: *Self,
         ) void {
@@ -321,6 +327,227 @@ pub fn Reassembler(
 
                 .flow_control => {
                     return null;
+                },
+
+                .unsupported => {
+                    return error.UnsupportedFrameType;
+                },
+            }
+        }
+    };
+}
+
+pub const RoutedMessage = struct {
+    source_address: u8,
+    destination_address: u8,
+    payload: []const u8,
+    delivery: MessageDelivery,
+};
+
+pub const RoutedFlowControl = struct {
+    source_address: u8,
+    destination_address: u8,
+    flow_control: FlowControlFrame,
+    matched_active_transfer: bool,
+};
+
+pub const SessionEvent = union(enum) {
+    in_progress,
+    completed: RoutedMessage,
+    flow_control: RoutedFlowControl,
+};
+
+pub const SessionError =
+    ReassemblyError ||
+    error{
+        SessionCapacityExceeded,
+    };
+
+/// Bounded passive ISO-TP session routing for the address-byte form observed
+/// in the authentic 29-bit diagnostic traffic.
+///
+/// Source and destination addresses are supplied by the caller. This layer
+/// does not interpret CAN identifiers itself.
+///
+/// Data frames belong to the directional (source, destination) transfer.
+/// Flow Control travels in the reverse direction and is matched against an
+/// active (destination, source) transfer.
+pub fn SessionRouter(
+    comptime session_capacity: usize,
+    comptime payload_capacity: usize,
+) type {
+    return struct {
+        const Self = @This();
+        const DirectionalReassembler =
+            Reassembler(payload_capacity);
+
+        const Session = struct {
+            in_use: bool = false,
+            source_address: u8 = 0,
+            destination_address: u8 = 0,
+            reassembler: DirectionalReassembler = .{},
+        };
+
+        sessions: [session_capacity]Session =
+            @splat(Session{}),
+
+        fn findSession(
+            self: *Self,
+            source_address: u8,
+            destination_address: u8,
+        ) ?*Session {
+            for (&self.sessions) |*session| {
+                if (session.in_use and
+                    session.source_address ==
+                        source_address and
+                    session.destination_address ==
+                        destination_address)
+                {
+                    return session;
+                }
+            }
+
+            return null;
+        }
+
+        fn acquireSession(
+            self: *Self,
+            source_address: u8,
+            destination_address: u8,
+        ) SessionError!*Session {
+            if (self.findSession(
+                source_address,
+                destination_address,
+            )) |session| {
+                if (session.reassembler.isActive()) {
+                    return error.TransferAlreadyActive;
+                }
+
+                session.reassembler.reset();
+                return session;
+            }
+
+            for (&self.sessions) |*session| {
+                if (!session.in_use or
+                    !session.reassembler.isActive())
+                {
+                    session.* = .{
+                        .in_use = true,
+                        .source_address = source_address,
+                        .destination_address = destination_address,
+                    };
+
+                    return session;
+                }
+            }
+
+            return error.SessionCapacityExceeded;
+        }
+
+        pub fn push(
+            self: *Self,
+            source_address: u8,
+            destination_address: u8,
+            frame: Frame,
+        ) SessionError!SessionEvent {
+            switch (frame) {
+                .single_frame => |single| {
+                    if (self.findSession(
+                        source_address,
+                        destination_address,
+                    )) |session| {
+                        if (session.reassembler.isActive()) {
+                            return error.TransferAlreadyActive;
+                        }
+                    }
+                    return .{
+                        .completed = .{
+                            .source_address = source_address,
+                            .destination_address = destination_address,
+                            .payload = single.payload,
+                            .delivery = .single_frame,
+                        },
+                    };
+                },
+
+                .first_frame => {
+                    const session =
+                        try self.acquireSession(
+                            source_address,
+                            destination_address,
+                        );
+
+                    const completed =
+                        try session.reassembler.push(
+                            frame,
+                        );
+
+                    if (completed) |message| {
+                        return .{
+                            .completed = .{
+                                .source_address = source_address,
+                                .destination_address = destination_address,
+                                .payload = message.payload,
+                                .delivery = message.delivery,
+                            },
+                        };
+                    }
+
+                    return .in_progress;
+                },
+
+                .consecutive_frame => {
+                    const session =
+                        self.findSession(
+                            source_address,
+                            destination_address,
+                        ) orelse
+                        return error.NoActiveTransfer;
+
+                    if (!session.reassembler.isActive()) {
+                        return error.NoActiveTransfer;
+                    }
+
+                    const completed =
+                        try session.reassembler.push(
+                            frame,
+                        );
+
+                    if (completed) |message| {
+                        return .{
+                            .completed = .{
+                                .source_address = source_address,
+                                .destination_address = destination_address,
+                                .payload = message.payload,
+                                .delivery = message.delivery,
+                            },
+                        };
+                    }
+
+                    return .in_progress;
+                },
+
+                .flow_control => |flow_control| {
+                    const transfer =
+                        self.findSession(
+                            destination_address,
+                            source_address,
+                        );
+
+                    const matched_active_transfer =
+                        if (transfer) |session|
+                            session.reassembler.isActive()
+                        else
+                            false;
+
+                    return .{
+                        .flow_control = .{
+                            .source_address = source_address,
+                            .destination_address = destination_address,
+                            .flow_control = flow_control,
+                            .matched_active_transfer = matched_active_transfer,
+                        },
+                    };
                 },
 
                 .unsupported => {
@@ -737,4 +964,198 @@ test "reassembly wraps consecutive sequence number from fifteen to zero" {
         sequence_number =
             (sequence_number + 1) & 0x0f;
     }
+}
+
+test "routes authentic bidirectional ISO-TP transfer" {
+    const first_data = [_]u8{
+        0x10, 0x16, 0x62, 0xf1,
+        0x95, 0x00, 0x02, 0x56,
+    };
+
+    const flow_control_data = [_]u8{
+        0x30, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+
+    const consecutive_1_data = [_]u8{
+        0x21, 0x00, 0x01, 0x52,
+        0x15, 0x00, 0x00, 0x61,
+    };
+
+    const consecutive_2_data = [_]u8{
+        0x22, 0x0a, 0x01, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+    };
+
+    const consecutive_3_data = [_]u8{
+        0x23, 0x00, 0x00, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+    };
+
+    var router =
+        SessionRouter(4, 64){};
+
+    const first_event =
+        try router.push(
+            0x00,
+            0xf1,
+            try parse(&first_data),
+        );
+
+    try std.testing.expect(
+        first_event == .in_progress,
+    );
+
+    const flow_control_event =
+        try router.push(
+            0xf1,
+            0x00,
+            try parse(&flow_control_data),
+        );
+
+    switch (flow_control_event) {
+        .flow_control => |flow_control| {
+            try std.testing.expect(
+                flow_control.matched_active_transfer,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf1),
+                flow_control.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                flow_control.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 8),
+                flow_control.flow_control.block_size,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try router.push(
+            0x00,
+            0xf1,
+            try parse(&consecutive_1_data),
+        ) == .in_progress,
+    );
+
+    try std.testing.expect(
+        try router.push(
+            0x00,
+            0xf1,
+            try parse(&consecutive_2_data),
+        ) == .in_progress,
+    );
+
+    const completed_event =
+        try router.push(
+            0x00,
+            0xf1,
+            try parse(&consecutive_3_data),
+        );
+
+    switch (completed_event) {
+        .completed => |message| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                message.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf1),
+                message.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.multi_frame,
+                message.delivery,
+            );
+
+            const expected = [_]u8{
+                0x62, 0xf1, 0x95, 0x00,
+                0x02, 0x56, 0x00, 0x01,
+                0x52, 0x15, 0x00, 0x00,
+                0x61, 0x0a, 0x01, 0x0a,
+                0x03, 0x0a, 0x0c, 0x00,
+                0x00, 0x00,
+            };
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &expected,
+                message.payload,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "preserves unmatched flow control as passive evidence" {
+    const flow_control_data = [_]u8{
+        0x30, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+
+    var router =
+        SessionRouter(4, 64){};
+
+    const event =
+        try router.push(
+            0xf1,
+            0x00,
+            try parse(&flow_control_data),
+        );
+
+    switch (event) {
+        .flow_control => |flow_control| {
+            try std.testing.expect(
+                !flow_control.matched_active_transfer,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "router rejects single frame during active directional transfer" {
+    const first_data = [_]u8{
+        0x10, 0x16,
+        0x62, 0xf1,
+        0x95, 0x00,
+        0x02, 0x56,
+    };
+
+    const single_data = [_]u8{
+        0x02, 0x10, 0x03,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+
+    var router =
+        SessionRouter(4, 64){};
+
+    try std.testing.expect(
+        try router.push(
+            0x00,
+            0xf1,
+            try parse(&first_data),
+        ) == .in_progress,
+    );
+
+    try std.testing.expectError(
+        error.TransferAlreadyActive,
+        router.push(
+            0x00,
+            0xf1,
+            try parse(&single_data),
+        ),
+    );
 }

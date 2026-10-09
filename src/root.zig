@@ -181,6 +181,153 @@ test "authentic DDEC diagnostic traffic reaches ISO-TP parser" {
     }
 }
 
+test "authentic DDEC diagnostic addresses route ISO-TP session" {
+    const std = @import("std");
+
+    const first_line =
+        "135.396711,552,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18daf100,data:,10,16,62,f1,95,00,02,56,";
+
+    const flow_control_line =
+        "135.397863,576,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18da00f1,data:,30,08,00,00,00,00,00,00,";
+
+    const consecutive_line =
+        "135.399007,560,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18daf100,data:,21,00,01,52,15,00,00,61,";
+
+    const first_record = switch (try ddec_csv.parseLine(first_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const flow_control_record = switch (try ddec_csv.parseLine(flow_control_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const consecutive_record = switch (try ddec_csv.parseLine(consecutive_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const first_can =
+        try first_record.frame();
+
+    const flow_control_can =
+        try flow_control_record.frame();
+
+    const consecutive_can =
+        try consecutive_record.frame();
+
+    try std.testing.expectEqual(
+        @as(u32, 0x18daf100),
+        first_can.identifier(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, 0x18da00f1),
+        flow_control_can.identifier(),
+    );
+
+    const first_source_address: u8 =
+        @truncate(first_can.identifier());
+
+    const first_destination_address: u8 =
+        @truncate(first_can.identifier() >> 8);
+
+    const flow_control_source_address: u8 =
+        @truncate(flow_control_can.identifier());
+
+    const flow_control_destination_address: u8 =
+        @truncate(
+            flow_control_can.identifier() >> 8,
+        );
+
+    const consecutive_source_address: u8 =
+        @truncate(
+            consecutive_can.identifier(),
+        );
+
+    const consecutive_destination_address: u8 =
+        @truncate(
+            consecutive_can.identifier() >> 8,
+        );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        first_source_address,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0xf1),
+        first_destination_address,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0xf1),
+        flow_control_source_address,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        flow_control_destination_address,
+    );
+
+    var router =
+        isotp.SessionRouter(4, 64){};
+
+    const first_event =
+        try router.push(
+            first_source_address,
+            first_destination_address,
+            try isotp.parse(
+                first_can.data(),
+            ),
+        );
+
+    try std.testing.expect(
+        first_event == .in_progress,
+    );
+
+    const flow_control_event =
+        try router.push(
+            flow_control_source_address,
+            flow_control_destination_address,
+            try isotp.parse(
+                flow_control_can.data(),
+            ),
+        );
+
+    switch (flow_control_event) {
+        .flow_control => |flow_control| {
+            try std.testing.expect(
+                flow_control
+                    .matched_active_transfer,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 8),
+                flow_control
+                    .flow_control
+                    .block_size,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const consecutive_event =
+        try router.push(
+            consecutive_source_address,
+            consecutive_destination_address,
+            try isotp.parse(
+                consecutive_can.data(),
+            ),
+        );
+
+    try std.testing.expect(
+        consecutive_event == .in_progress,
+    );
+}
+
 test "logger text reaches typed J1587 observation" {
     const std = @import("std");
 
