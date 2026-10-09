@@ -1,6 +1,6 @@
 # Heavy Duty Zig — Architecture Decisions
 
-Updated: 2026-10-07
+Updated: 2026-10-09
 
 This document records significant architectural decisions for Heavy Duty Zig (HDZ).
 It is not a changelog. Small implementation details do not belong here.
@@ -12,9 +12,11 @@ architecture is, but *why* it was chosen.
 
 **Protocol layers report facts. Higher layers assign diagnostic meaning.**
 
-HDZ is truck-side diagnostics infrastructure first. Current work is J1708/J1587
-capture ingestion. Active requests, clears, programming, and service actions remain
-out of scope unless explicitly supported and proven safe.
+HDZ is truck-side diagnostics infrastructure first. Current work is passive
+diagnostic evidence collection, correlation, and inventory across J1708/J1587,
+J1939, and observed ISO-TP/UDS traffic. Active requests, clears, programming,
+and service actions remain out of scope unless explicitly supported and proven
+safe.
 
 ---
 
@@ -667,9 +669,116 @@ validity.
 
 ---
 
+## AD-019 — Protocol endpoints are capture-local evidence, not permanent device identity
+
+**Status:** Accepted
+
+### Decision
+
+Protocol endpoint identifiers remain scoped to the protocol and capture context in
+which they were observed.
+
+Examples include:
+
+- J1587 MID;
+- J1939 source address;
+- ISO-TP source and destination address bytes.
+
+Numerically equal values across different protocol namespaces are not treated as
+proof that they identify the same controller or physical ECU.
+
+### Why
+
+Network addressing is operational and protocol-specific. Addresses may be reused,
+changed, assigned dynamically, or interpreted differently by different protocols.
+
+HDZ therefore preserves endpoint observations as evidence and keeps their protocol
+namespace explicit.
+
+### Consequence
+
+Higher-level correlation may relate observations from different endpoints when the
+capture provides supporting evidence, but the relationship must preserve the reason
+for the association rather than silently merging the endpoints into one device
+identity.
+
+---
+
+## AD-020 — Cross-protocol correlation preserves the reason for association
+
+**Status:** Accepted
+
+### Decision
+
+When HDZ relates observations across protocol boundaries, the relationship must
+state the evidence that justifies the association.
+
+An exact payload match is represented as exact byte equality between observations.
+It does not by itself establish that the observations have the same standardized
+meaning or originate from the same physical ECU.
+
+### Why
+
+Authentic capture evidence has shown that a J1939 Component Identification payload
+can exactly match the bytes following a UDS ReadDataByIdentifier DID.
+
+That is stronger evidence than numeric address coincidence, but it still does not
+prove a universal DID meaning or permanent physical-device identity.
+
+### Consequence
+
+Correlation results remain evidence-bearing relationships.
+
+Higher-level diagnostic code may use multiple relationships together to form stronger
+inferences, but HDZ does not silently promote one observed relationship into a
+controller or physical ECU identity claim.
+
+---
+
+## AD-021 — ISO-TP/UDS remains separate from J1939
+
+**Status:** Accepted
+
+### Decision
+
+ISO-TP session reconstruction and UDS message decoding remain a protocol path
+separate from J1939.
+
+The presence of both protocol families in the same CAN capture does not make
+ISO-TP traffic part of J1939, even when both use 29-bit CAN identifiers or
+contain numerically equal address values.
+
+### Why
+
+J1939 and ISO-TP/UDS have different transport, routing, and message semantics.
+
+Treating ISO-TP as a J1939 subprotocol would blur those boundaries and could
+cause capture-local addressing or transport behavior from one protocol to be
+given meaning that belongs to the other.
+
+Authentic capture evidence can still reveal relationships between observations
+produced by the two protocol paths.
+
+### Consequence
+
+CAN capture data may feed both J1939 and ISO-TP processing where appropriate,
+but each protocol layer reports its own facts.
+
+Cross-protocol association belongs in the correlation layer, where the evidence
+supporting the relationship can be preserved explicitly.
+
+---
+
 # Open architecture questions
 
-None recorded at this checkpoint.
+How should HDZ preserve and query durable capture-level relationships between
+observations while retaining the evidence that justified each association and
+without prematurely creating controller or physical ECU identity?
+
+The current J1939/UDS exact-payload matcher demonstrates that such relationships can
+be discovered. The unresolved question is how those relationships should be
+owned across the capture lifetime, represented without losing provenance, and
+exposed to higher-level diagnostic code.
 
 ---
 

@@ -8,7 +8,7 @@ interpreting heavy-duty commercial vehicle network data.
 ## Current scope
 
 Heavy Duty Zig currently supports diagnostic evidence extraction from
-J1708/J1587 and J1939 captures.
+J1708/J1587, J1939, and observed ISO-TP/UDS traffic.
 
 ### J1708/J1587
 
@@ -45,6 +45,15 @@ J1708/J1587 and J1939 captures.
 - typed observation delivery from reconstructed J1939 messages
 - explicit preservation of unsupported PGNs and transport controls
 
+### ISO-TP/UDS
+
+- ISO-TP single-frame and multi-frame message reconstruction
+- bounded session routing by observed source and destination address bytes
+- flow-control observation and active-transfer matching
+- UDS service-message and negative-response parsing
+- ReadDataByIdentifier response structure and DID evidence
+- exact cross-protocol payload correlation without assuming shared physical identity
+
 ## Design
 
 Protocol layers report protocol facts.
@@ -78,9 +87,12 @@ Heavy Duty Zig can reconstruct observed payloads and track transport aborts,
 but it does not implement an active RTS/CTS endpoint or claim successful
 transport completion merely because all payload bytes were observed.
 
-Cross-observation correlation, active diagnostic requests, fault clearing,
-programming operations, and physical-layer acquisition are not implemented
-yet.
+Passive cross-observation correlation is now implemented for capture-local
+endpoint and identity evidence, including exact cross-protocol payload
+relationships. These relationships remain evidence and are not promoted to
+permanent controller or physical ECU identity. Active diagnostic requests,
+fault clearing, programming operations, and physical-layer acquisition are
+not implemented yet.
 
 ## Tracking
 
@@ -96,8 +108,9 @@ Current diagnostic direction:
 4. Preserve unsupported and ambiguous evidence instead of silently assigning
    higher-level meaning.
 
-The next architectural problem is cross-observation correlation: determining
-which observations can safely be associated with the same observed network
-participant while preserving the distinction between network address,
-controller-application identity, component identity, and physical ECU
-identity.
+The current architectural problem is preserving and querying relationships
+between observations without prematurely promoting those relationships to
+controller or physical ECU identity. Correlation must retain why evidence was
+associated, such as exact payload equality, while preserving the distinction
+between network address, controller-application identity, component identity,
+and physical ECU identity.
