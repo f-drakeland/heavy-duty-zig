@@ -221,6 +221,39 @@ pub const EvidenceValueId = struct {
     }
 };
 
+pub const EvidenceRelationshipReason = enum {
+    exact_payload_equality,
+};
+
+/// Capture-local relationship between two distinct durable evidence values.
+///
+/// A relationship records why two values are associated. It does not merge
+/// their protocol endpoints or establish controller or physical ECU identity.
+pub const EvidenceRelationship = struct {
+    left: EvidenceValueId,
+    right: EvidenceValueId,
+    reason: EvidenceRelationshipReason,
+    byte_length: usize,
+
+    pub fn eql(
+        self: EvidenceRelationship,
+        other: EvidenceRelationship,
+    ) bool {
+        if (self.reason != other.reason or
+            self.byte_length != other.byte_length)
+        {
+            return false;
+        }
+
+        return switch (self.reason) {
+            .exact_payload_equality => (self.left.eql(other.left) and
+                self.right.eql(other.right)) or
+                (self.left.eql(other.right) and
+                    self.right.eql(other.left)),
+        };
+    }
+};
+
 pub const CorrelationEvidenceObserveStatus = enum {
     new_evidence,
     existing_evidence,
@@ -307,6 +340,69 @@ pub fn CorrelationEvidenceInventory(
             return error.CorrelationEvidenceCapacityExceeded;
         }
 
+        /// Derives the exact cross-protocol payload relationship currently
+        /// supported by HDZ.
+        ///
+        /// The returned orientation is canonical: J1939 evidence is `left`
+        /// and UDS evidence is `right`, regardless of argument order.
+        pub fn exactPayloadRelationship(
+            self: *const Self,
+            first_id: EvidenceValueId,
+            second_id: EvidenceValueId,
+        ) ?EvidenceRelationship {
+            if (first_id.eql(second_id)) {
+                return null;
+            }
+
+            const first =
+                self.evidence(first_id) orelse
+                return null;
+
+            const second =
+                self.evidence(second_id) orelse
+                return null;
+
+            return switch (first.evidence.*) {
+                .j1939_component_identification_payload => |j1939_value| switch (second.evidence.*) {
+                    .uds_data_identifier_response => |uds_value| {
+                        if (!j1939_value.payload.eql(
+                            &uds_value.data_after_identifier,
+                        )) {
+                            return null;
+                        }
+
+                        return .{
+                            .left = first_id,
+                            .right = second_id,
+                            .reason = .exact_payload_equality,
+                            .byte_length = j1939_value.payload.bytes().len,
+                        };
+                    },
+
+                    else => null,
+                },
+
+                .uds_data_identifier_response => |uds_value| switch (second.evidence.*) {
+                    .j1939_component_identification_payload => |j1939_value| {
+                        if (!j1939_value.payload.eql(
+                            &uds_value.data_after_identifier,
+                        )) {
+                            return null;
+                        }
+
+                        return .{
+                            .left = second_id,
+                            .right = first_id,
+                            .reason = .exact_payload_equality,
+                            .byte_length = j1939_value.payload.bytes().len,
+                        };
+                    },
+
+                    else => null,
+                },
+            };
+        }
+
         pub fn count(
             self: *const Self,
         ) usize {
@@ -332,6 +428,182 @@ pub fn CorrelationEvidenceInventory(
                 .evidence = &slot.evidence,
                 .occurrence_count = slot.occurrence_count,
             };
+        }
+    };
+}
+
+/// Capture-local identity of one durable evidence relationship.
+pub const EvidenceRelationshipId = struct {
+    index: usize,
+
+    pub fn eql(
+        self: EvidenceRelationshipId,
+        other: EvidenceRelationshipId,
+    ) bool {
+        return self.index == other.index;
+    }
+};
+
+pub const EvidenceRelationshipRecordStatus = enum {
+    new_relationship,
+    existing_relationship,
+};
+
+pub const EvidenceRelationshipRecordResult = struct {
+    id: EvidenceRelationshipId,
+    status: EvidenceRelationshipRecordStatus,
+};
+
+pub const EvidenceRelationshipInventoryError = error{
+    EvidenceRelationshipCapacityExceeded,
+    InvalidEvidenceRelationship,
+};
+
+/// Bounded capture-local inventory of relationships between durable evidence
+/// values.
+///
+/// EvidenceValueIds supplied here must belong to the same capture-local
+/// CorrelationEvidenceInventory. Relationships preserve associations between
+/// evidence values; they do not merge those values or their protocol endpoints.
+pub fn EvidenceRelationshipInventory(
+    comptime capacity: usize,
+) type {
+    if (capacity == 0) {
+        @compileError(
+            "evidence relationship capacity must be greater than zero",
+        );
+    }
+
+    return struct {
+        const Self = @This();
+
+        pub const RelationshipView = struct {
+            id: EvidenceRelationshipId,
+            relationship: *const EvidenceRelationship,
+        };
+
+        const Slot = struct {
+            occupied: bool = false,
+            relationship: EvidenceRelationship = undefined,
+        };
+
+        slots: [capacity]Slot = @splat(.{}),
+        relationship_count: usize = 0,
+
+        pub fn record(
+            self: *Self,
+            candidate: EvidenceRelationship,
+        ) EvidenceRelationshipInventoryError!EvidenceRelationshipRecordResult {
+            if (candidate.left.eql(candidate.right)) {
+                return error.InvalidEvidenceRelationship;
+            }
+
+            for (&self.slots, 0..) |*slot, index| {
+                if (slot.occupied and
+                    slot.relationship.eql(candidate))
+                {
+                    return .{
+                        .id = .{ .index = index },
+                        .status = .existing_relationship,
+                    };
+                }
+            }
+
+            for (&self.slots, 0..) |*slot, index| {
+                if (!slot.occupied) {
+                    slot.* = .{
+                        .occupied = true,
+                        .relationship = candidate,
+                    };
+
+                    self.relationship_count += 1;
+
+                    return .{
+                        .id = .{ .index = index },
+                        .status = .new_relationship,
+                    };
+                }
+            }
+
+            return error.EvidenceRelationshipCapacityExceeded;
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.relationship_count;
+        }
+
+        pub fn relationship(
+            self: *const Self,
+            id: EvidenceRelationshipId,
+        ) ?RelationshipView {
+            if (id.index >= capacity) {
+                return null;
+            }
+
+            const slot = &self.slots[id.index];
+
+            if (!slot.occupied) {
+                return null;
+            }
+
+            return .{
+                .id = id,
+                .relationship = &slot.relationship,
+            };
+        }
+
+        pub fn relationshipCountForEvidence(
+            self: *const Self,
+            evidence_id: EvidenceValueId,
+        ) usize {
+            var result: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (slot.relationship.left.eql(evidence_id) or
+                    slot.relationship.right.eql(evidence_id))
+                {
+                    result += 1;
+                }
+            }
+
+            return result;
+        }
+
+        pub fn relationshipForEvidenceAt(
+            self: *const Self,
+            evidence_id: EvidenceValueId,
+            index: usize,
+        ) ?RelationshipView {
+            var matching_index: usize = 0;
+
+            for (&self.slots, 0..) |*slot, slot_index| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (!slot.relationship.left.eql(evidence_id) and
+                    !slot.relationship.right.eql(evidence_id))
+                {
+                    continue;
+                }
+
+                if (matching_index == index) {
+                    return .{
+                        .id = .{ .index = slot_index },
+                        .relationship = &slot.relationship,
+                    };
+                }
+
+                matching_index += 1;
+            }
+
+            return null;
         }
     };
 }
@@ -1492,6 +1764,270 @@ test "correlation evidence inventory reports capacity exhaustion" {
                 .data_after_identifier = &.{0x11},
             }),
         ),
+    );
+}
+
+test "correlation inventory derives exact cross-protocol payload relationship" {
+    const Owned = OwnedCorrelationEvidence(4);
+    const Inventory = CorrelationEvidenceInventory(4, 4);
+
+    var inventory: Inventory = .{};
+
+    const j1939_result = try inventory.observe(
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?,
+    );
+
+    const uds_result = try inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x7a,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf157,
+            .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+        }),
+    );
+
+    const relationship =
+        inventory.exactPayloadRelationship(
+            uds_result.id,
+            j1939_result.id,
+        ).?;
+
+    try std.testing.expect(
+        relationship.left.eql(j1939_result.id),
+    );
+    try std.testing.expect(
+        relationship.right.eql(uds_result.id),
+    );
+    try std.testing.expectEqual(
+        EvidenceRelationshipReason.exact_payload_equality,
+        relationship.reason,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        relationship.byte_length,
+    );
+}
+
+test "correlation inventory rejects unsupported or unequal payload relationships" {
+    const Owned = OwnedCorrelationEvidence(4);
+    const Inventory = CorrelationEvidenceInventory(4, 4);
+
+    var inventory: Inventory = .{};
+
+    const j1939_result = try inventory.observe(
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?,
+    );
+
+    const uds_different = try inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf157,
+            .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xfe },
+        }),
+    );
+
+    const uds_same_bytes_other_did = try inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf158,
+            .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xfe },
+        }),
+    );
+
+    try std.testing.expect(
+        inventory.exactPayloadRelationship(
+            j1939_result.id,
+            uds_different.id,
+        ) == null,
+    );
+
+    try std.testing.expect(
+        inventory.exactPayloadRelationship(
+            uds_different.id,
+            uds_same_bytes_other_did.id,
+        ) == null,
+    );
+
+    try std.testing.expect(
+        inventory.exactPayloadRelationship(
+            j1939_result.id,
+            j1939_result.id,
+        ) == null,
+    );
+}
+
+test "relationship inventory preserves and deduplicates exact relationships" {
+    const Owned = OwnedCorrelationEvidence(4);
+    const EvidenceInventory = CorrelationEvidenceInventory(4, 4);
+    const Relationships = EvidenceRelationshipInventory(4);
+
+    var evidence_inventory: EvidenceInventory = .{};
+    var relationships: Relationships = .{};
+
+    const j1939_result = try evidence_inventory.observe(
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?,
+    );
+
+    const uds_result = try evidence_inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x7a,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf157,
+            .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+        }),
+    );
+
+    const relationship =
+        evidence_inventory.exactPayloadRelationship(
+            j1939_result.id,
+            uds_result.id,
+        ).?;
+
+    const first = try relationships.record(relationship);
+
+    const reversed = EvidenceRelationship{
+        .left = relationship.right,
+        .right = relationship.left,
+        .reason = relationship.reason,
+        .byte_length = relationship.byte_length,
+    };
+
+    const repeated = try relationships.record(reversed);
+
+    try std.testing.expectEqual(
+        EvidenceRelationshipRecordStatus.new_relationship,
+        first.status,
+    );
+    try std.testing.expectEqual(
+        EvidenceRelationshipRecordStatus.existing_relationship,
+        repeated.status,
+    );
+    try std.testing.expect(first.id.eql(repeated.id));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        relationships.count(),
+    );
+
+    const stored = relationships.relationship(first.id).?;
+
+    try std.testing.expect(
+        stored.relationship.eql(relationship),
+    );
+}
+
+test "relationship inventory queries multiple associations without merging evidence" {
+    const Owned = OwnedCorrelationEvidence(4);
+    const EvidenceInventory = CorrelationEvidenceInventory(4, 4);
+    const Relationships = EvidenceRelationshipInventory(4);
+
+    var evidence_inventory: EvidenceInventory = .{};
+    var relationships: Relationships = .{};
+
+    const j1939_result = try evidence_inventory.observe(
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 1, 2, 3, 4 },
+        })).?,
+    );
+
+    const uds_first = try evidence_inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x7a,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf157,
+            .data_after_identifier = &.{ 1, 2, 3, 4 },
+        }),
+    );
+
+    const uds_second = try evidence_inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x7a,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf158,
+            .data_after_identifier = &.{ 1, 2, 3, 4 },
+        }),
+    );
+
+    _ = try relationships.record(
+        evidence_inventory.exactPayloadRelationship(
+            j1939_result.id,
+            uds_first.id,
+        ).?,
+    );
+
+    _ = try relationships.record(
+        evidence_inventory.exactPayloadRelationship(
+            j1939_result.id,
+            uds_second.id,
+        ).?,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        relationships.relationshipCountForEvidence(
+            j1939_result.id,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        relationships.relationshipCountForEvidence(
+            uds_first.id,
+        ),
+    );
+    try std.testing.expect(
+        relationships.relationshipForEvidenceAt(
+            j1939_result.id,
+            0,
+        ) != null,
+    );
+    try std.testing.expect(
+        relationships.relationshipForEvidenceAt(
+            j1939_result.id,
+            1,
+        ) != null,
+    );
+    try std.testing.expect(
+        relationships.relationshipForEvidenceAt(
+            j1939_result.id,
+            2,
+        ) == null,
     );
 }
 
