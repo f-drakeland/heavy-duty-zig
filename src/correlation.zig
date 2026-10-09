@@ -396,6 +396,23 @@ pub fn IdentityEvidenceInventory(
             return self.evidence_count;
         }
 
+        pub fn evidenceCountForEndpoint(
+            self: *const Self,
+            key: EndpointKey,
+        ) usize {
+            var count_for_endpoint: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.observation.endpoint.eql(key))
+                {
+                    count_for_endpoint += 1;
+                }
+            }
+
+            return count_for_endpoint;
+        }
+
         pub fn evidenceAt(
             self: *const Self,
             index: usize,
@@ -404,6 +421,33 @@ pub fn IdentityEvidenceInventory(
 
             for (&self.slots) |*slot| {
                 if (!slot.occupied) {
+                    continue;
+                }
+
+                if (observed_index == index) {
+                    return .{
+                        .observation = &slot.observation,
+                        .occurrence_count = slot.occurrence_count,
+                    };
+                }
+
+                observed_index += 1;
+            }
+
+            return null;
+        }
+
+        pub fn evidenceForEndpointAt(
+            self: *const Self,
+            key: EndpointKey,
+            index: usize,
+        ) ?EvidenceView {
+            var observed_index: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied or
+                    !slot.observation.endpoint.eql(key))
+                {
                     continue;
                 }
 
@@ -1497,5 +1541,115 @@ test "identity inventory keeps same evidence separate across endpoints" {
     try std.testing.expectEqual(
         @as(usize, 2),
         inventory.count(),
+    );
+}
+
+test "identity inventory queries distinct evidence by endpoint" {
+    const first = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    const conflicting = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x2003030000400064,
+            },
+        },
+    });
+
+    const other_endpoint = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x81,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    var inventory =
+        IdentityEvidenceInventory(4, 32){};
+
+    _ = try inventory.observe(first);
+    _ = try inventory.observe(first);
+    _ = try inventory.observe(conflicting);
+    _ = try inventory.observe(other_endpoint);
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.evidenceCountForEndpoint(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.evidenceCountForEndpoint(.{
+            .j1939_source_address = 0x81,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        inventory.evidenceCountForEndpoint(.{
+            .j1939_source_address = 0x82,
+        }),
+    );
+
+    const first_evidence =
+        inventory.evidenceForEndpointAt(
+            .{
+                .j1939_source_address = 0x80,
+            },
+            0,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    const second_evidence =
+        inventory.evidenceForEndpointAt(
+            .{
+                .j1939_source_address = 0x80,
+            },
+            1,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        first_evidence.occurrence_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        second_evidence.occurrence_count,
+    );
+
+    try std.testing.expect(
+        first_evidence.observation.endpoint.eql(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expect(
+        second_evidence.observation.endpoint.eql(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expect(
+        inventory.evidenceForEndpointAt(
+            .{
+                .j1939_source_address = 0x80,
+            },
+            2,
+        ) == null,
     );
 }
