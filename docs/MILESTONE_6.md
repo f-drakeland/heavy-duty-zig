@@ -72,6 +72,37 @@ distinguishable from malformed traffic.
 
 Decode coverage must not be increased by guessing.
 
+## Current progress
+
+The passive CAN/J1939 pipeline is now established through authentic capture
+validation.
+
+Current demonstrated capabilities include:
+
+- candump-style passive CAN capture ingestion;
+- classical CAN frame validation;
+- J1939 29-bit identifier and PGN decoding;
+- concurrent BAM receive-side transport reassembly;
+- logical J1939 message construction;
+- preservation of unsupported PGNs as evidence;
+- DM1 lamp decoding and DTC parsing support;
+- EEC1 SPN 190 engine-speed decoding as a typed operating-state observation.
+
+Against the current private authentic Class 6 truck capture, HDZ processed
+34,980 CAN/J1939 frames with:
+
+- 34,980 records parsed;
+- 0 parse rejections;
+- 0 J1939 rejections;
+- 42 completed BAM transfers;
+- 151 DM1 lamp observations;
+- 2,644 EEC1 engine-speed observations;
+- 0 assembly errors;
+- 0 decode errors.
+
+The authentic capture contains no populated DM1 trouble-code observations, so
+authentic populated-DTC validation remains outstanding.
+
 ## Completion criteria
 
 Milestone 6 is complete when HDZ can take an authentic passive CAN/J1939
