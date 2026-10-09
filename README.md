@@ -108,9 +108,10 @@ Current diagnostic direction:
 4. Preserve unsupported and ambiguous evidence instead of silently assigning
    higher-level meaning.
 
-The current architectural problem is preserving and querying relationships
-between observations without prematurely promoting those relationships to
-controller or physical ECU identity. Correlation must retain why evidence was
-associated, such as exact payload equality, while preserving the distinction
-between network address, controller-application identity, component identity,
-and physical ECU identity.
+The current diagnostic problem is assembling preserved observations and
+evidence-backed relationships into a useful passive capture-level inventory
+without prematurely promoting those relationships to permanent controller or
+physical ECU identity. Durable value-level relationships are now preserved and
+queryable with their association reason. Occurrence-level provenance remains an
+open architecture question for future temporal, request/response, and sequence
+relationships.
