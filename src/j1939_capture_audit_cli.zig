@@ -46,7 +46,12 @@ pub fn main(init: std.process.Init) !void {
         \\BAM started: {}
         \\BAM completed: {}
         \\unsupported transport controls: {}
+        \\transport aborts: {}
+        \\transport aborts matched active session: {}
+        \\RTS/CTS payloads reassembled: {}
         \\assembly errors: {}
+        \\Address claim observations: {}
+        \\Component identification observations: {}
         \\EEC1 engine speed observations: {}
         \\DM1 lamp observations: {}
         \\DM1 DTC observations: {}
@@ -67,7 +72,12 @@ pub fn main(init: std.process.Init) !void {
             audit.bam_started,
             audit.bam_completed,
             audit.unsupported_transport_controls,
+            audit.transport_aborts,
+            audit.transport_aborts_matched,
+            audit.rts_cts_payloads_reassembled,
             audit.assembly_errors,
+            audit.address_claim_observations,
+            audit.component_identification_observations,
             audit.eec1_engine_speed_observations,
             audit.dm1_lamp_observations,
             audit.dm1_dtc_observations,

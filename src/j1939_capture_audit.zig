@@ -18,8 +18,13 @@ pub const Audit = struct {
     bam_started: usize = 0,
     bam_completed: usize = 0,
     unsupported_transport_controls: usize = 0,
+    transport_aborts: usize = 0,
+    transport_aborts_matched: usize = 0,
+    rts_cts_payloads_reassembled: usize = 0,
     assembly_errors: usize = 0,
 
+    address_claim_observations: usize = 0,
+    component_identification_observations: usize = 0,
     eec1_engine_speed_observations: usize = 0,
     dm1_lamp_observations: usize = 0,
     dm1_dtc_observations: usize = 0,
@@ -33,8 +38,8 @@ fn auditMessage(
 ) void {
     switch (message.delivery()) {
         .single_frame => audit.single_frame_messages += 1,
-
         .bam => audit.bam_completed += 1,
+        .rts_cts => audit.rts_cts_payloads_reassembled += 1,
     }
 
     var cursor =
@@ -60,6 +65,14 @@ fn auditMessage(
 
             .observation => |observation| {
                 switch (observation) {
+                    .component_identification => {
+                        audit.component_identification_observations += 1;
+                    },
+
+                    .address_claim => {
+                        audit.address_claim_observations += 1;
+                    },
+
                     .eec1_engine_speed => {
                         audit.eec1_engine_speed_observations += 1;
                     },
@@ -132,6 +145,10 @@ pub fn auditText(
 
             .transport_data_transfer => audit.tp_dt_frames += 1,
 
+            .component_identification => {},
+
+            .address_claimed => {},
+
             .electronic_engine_controller_1 => {},
 
             .diagnostic_message_1 => audit.direct_dm1_frames += 1,
@@ -152,6 +169,14 @@ pub fn auditText(
         switch (assembly_event) {
             .bam_started => {
                 audit.bam_started += 1;
+            },
+
+            .transport_aborted => |aborted| {
+                audit.transport_aborts += 1;
+
+                if (aborted.matched_active_session) {
+                    audit.transport_aborts_matched += 1;
+                }
             },
 
             .unsupported_transport_control => {

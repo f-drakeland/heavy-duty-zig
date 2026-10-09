@@ -52,6 +52,21 @@ pub fn Reassembler(comptime capacity: usize) type {
             packet_count: u8,
             target_pgn: u32,
         ) ReassemblyError!void {
+            return self.startTransfer(
+                source_address,
+                total_message_size,
+                packet_count,
+                target_pgn,
+            );
+        }
+
+        pub fn startTransfer(
+            self: *Self,
+            source_address: u8,
+            total_message_size: u16,
+            packet_count: u8,
+            target_pgn: u32,
+        ) ReassemblyError!void {
             if (self.active) {
                 return error.TransferAlreadyActive;
             }

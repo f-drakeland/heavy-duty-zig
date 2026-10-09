@@ -4,11 +4,16 @@ const can = @import("can.zig");
 pub const transport = @import("j1939/transport.zig");
 pub const dm1 = @import("j1939/dm1.zig");
 pub const eec1 = @import("j1939/eec1.zig");
+pub const address_claim = @import("j1939/address_claim.zig");
+pub const component_identification =
+    @import("j1939/component_identification.zig");
 
 pub const pdu2_format_min: u8 = 0xf0;
 
 pub const pgn_transport_data_transfer: u32 = 0x00eb00;
 pub const pgn_transport_connection_management: u32 = 0x00ec00;
+pub const pgn_address_claimed: u32 = 0x00ee00;
+pub const pgn_component_identification: u32 = 0x00feeb;
 pub const pgn_diagnostic_message_1: u32 = 0x00feca;
 pub const pgn_electronic_engine_controller_1: u32 = 0x00f004;
 
@@ -25,6 +30,8 @@ pub const PduKind = enum {
 pub const PgnClassification = union(enum) {
     transport_data_transfer,
     transport_connection_management,
+    address_claimed,
+    component_identification,
     electronic_engine_controller_1,
     diagnostic_message_1,
     unsupported: u32,
@@ -33,6 +40,7 @@ pub const PgnClassification = union(enum) {
 pub const MessageDelivery = enum {
     single_frame,
     bam,
+    rts_cts,
 };
 
 pub const Dm1LampObservation = struct {
@@ -55,7 +63,24 @@ pub const Eec1EngineSpeedObservation = struct {
     rpm: f64,
 };
 
+pub const AddressClaimObservation = struct {
+    source_address: u8,
+    delivery: MessageDelivery,
+    name: address_claim.Name,
+};
+
+pub const ComponentIdentificationObservation = struct {
+    source_address: u8,
+    delivery: MessageDelivery,
+    make: []const u8,
+    model: []const u8,
+    serial_number: []const u8,
+    unit_number: []const u8,
+};
+
 pub const Observation = union(enum) {
+    component_identification: ComponentIdentificationObservation,
+    address_claim: AddressClaimObservation,
     eec1_engine_speed: Eec1EngineSpeedObservation,
     dm1_lamps: Dm1LampObservation,
     dm1_diagnostic_trouble_code: Dm1DiagnosticTroubleCodeObservation,
@@ -80,6 +105,15 @@ pub const BamStarted = struct {
     packet_count: u8,
 };
 
+pub const TransportAborted = struct {
+    source_address: u8,
+    destination_address: u8,
+    reason: u8,
+    target_pgn: u32,
+    matched_active_session: bool,
+    data: []const u8,
+};
+
 pub const UnsupportedTransportControl = struct {
     source_address: u8,
     destination_address: ?u8,
@@ -88,6 +122,7 @@ pub const UnsupportedTransportControl = struct {
 };
 
 pub const MessageAssemblyEvent = union(enum) {
+    transport_aborted: TransportAborted,
     message: MessageView,
     bam_started: BamStarted,
     unsupported_transport_control: UnsupportedTransportControl,
@@ -96,12 +131,15 @@ pub const MessageAssemblyEvent = union(enum) {
 pub const MessageAssemblyError =
     error{
         InvalidBamDestination,
+        InvalidDirectedTransportDestination,
         SessionCapacityExceeded,
     } ||
     transport.ParseError ||
     transport.reassembly.ReassemblyError;
 
 pub const MessageDecodeError =
+    component_identification.ParseError ||
+    address_claim.ParseError ||
     dm1.PayloadError ||
     dm1.ParseError ||
     eec1.ParseError;
@@ -111,6 +149,10 @@ pub fn classifyPgn(pgn: u32) PgnClassification {
         pgn_transport_data_transfer => .transport_data_transfer,
 
         pgn_transport_connection_management => .transport_connection_management,
+
+        pgn_address_claimed => .address_claimed,
+
+        pgn_component_identification => .component_identification,
 
         pgn_electronic_engine_controller_1 => .electronic_engine_controller_1,
 
@@ -275,6 +317,17 @@ pub const MessageView = struct {
         };
     }
 
+    pub fn fromRtsCts(
+        completed: transport.reassembly.CompletedMessage,
+    ) MessageView {
+        return .{
+            .pgn_value = completed.target_pgn,
+            .source_address_value = completed.source_address,
+            .payload = completed.data,
+            .delivery_method = .rts_cts,
+        };
+    }
+
     pub fn pgn(self: MessageView) u32 {
         return self.pgn_value;
     }
@@ -304,23 +357,58 @@ pub fn MessageAssembler(
                 message_capacity,
             );
 
-        const BamSession = struct {
+        const TransportSession = struct {
             occupied: bool = false,
             source_address: u8 = 0,
+            destination_address: u8 = 0,
+            target_pgn: u32 = 0,
+            delivery: MessageDelivery = .bam,
             reassembler: Reassembler = .{},
         };
 
-        sessions: [session_capacity]BamSession =
+        sessions: [session_capacity]TransportSession =
             @splat(.{}),
 
         fn findSession(
             self: *Self,
             source_address: u8,
-        ) ?*BamSession {
+            destination_address: u8,
+        ) ?*TransportSession {
             for (&self.sessions) |*session| {
                 if (session.occupied and
-                    session.source_address == source_address)
+                    session.source_address == source_address and
+                    session.destination_address == destination_address)
                 {
+                    return session;
+                }
+            }
+
+            return null;
+        }
+
+        fn findRtsCtsSessionForAbort(
+            self: *Self,
+            source_address: u8,
+            destination_address: u8,
+            target_pgn: u32,
+        ) ?*TransportSession {
+            for (&self.sessions) |*session| {
+                if (!session.occupied or
+                    session.delivery != .rts_cts or
+                    session.target_pgn != target_pgn)
+                {
+                    continue;
+                }
+
+                const same_direction =
+                    session.source_address == source_address and
+                    session.destination_address == destination_address;
+
+                const reverse_direction =
+                    session.source_address == destination_address and
+                    session.destination_address == source_address;
+
+                if (same_direction or reverse_direction) {
                     return session;
                 }
             }
@@ -330,7 +418,7 @@ pub fn MessageAssembler(
 
         fn findFreeSession(
             self: *Self,
-        ) ?*BamSession {
+        ) ?*TransportSession {
             for (&self.sessions) |*session| {
                 if (!session.occupied) {
                     return session;
@@ -354,13 +442,86 @@ pub fn MessageAssembler(
                         );
 
                     switch (connection_management) {
+                        .abort => |abort| {
+                            const destination_address =
+                                identifier.destination_address orelse
+                                return error.InvalidDirectedTransportDestination;
+
+                            if (destination_address == 0xff) {
+                                return error.InvalidDirectedTransportDestination;
+                            }
+
+                            const session =
+                                self.findRtsCtsSessionForAbort(
+                                    identifier.source_address,
+                                    destination_address,
+                                    abort.target_pgn,
+                                );
+
+                            const matched_active_session =
+                                session != null;
+
+                            if (session) |active_session| {
+                                active_session.reassembler.reset();
+                                active_session.occupied = false;
+                                active_session.source_address = 0;
+                                active_session.destination_address = 0;
+                                active_session.target_pgn = 0;
+                                active_session.delivery = .bam;
+                            }
+
+                            return .{
+                                .transport_aborted = .{
+                                    .source_address = identifier.source_address,
+                                    .destination_address = destination_address,
+                                    .reason = abort.reason,
+                                    .target_pgn = abort.target_pgn,
+                                    .matched_active_session = matched_active_session,
+                                    .data = frame.data(),
+                                },
+                            };
+                        },
+
+                        .rts => |rts| {
+                            const destination_address =
+                                identifier.destination_address orelse
+                                return error.NoActiveTransfer;
+
+                            const session =
+                                self.findSession(
+                                    identifier.source_address,
+                                    destination_address,
+                                ) orelse
+                                self.findFreeSession() orelse
+                                return error.SessionCapacityExceeded;
+
+                            try session.reassembler.startTransfer(
+                                identifier.source_address,
+                                rts.total_message_size,
+                                rts.packet_count,
+                                rts.target_pgn,
+                            );
+
+                            session.occupied = true;
+                            session.source_address =
+                                identifier.source_address;
+                            session.destination_address =
+                                destination_address;
+                            session.target_pgn = rts.target_pgn;
+                            session.delivery = .rts_cts;
+
+                            return null;
+                        },
                         .bam => |bam| {
                             if (identifier.destination_address != @as(?u8, 0xff)) {
                                 return error.InvalidBamDestination;
                             }
 
                             const session =
-                                self.findSession(identifier.source_address) orelse
+                                self.findSession(
+                                    identifier.source_address,
+                                    0xff,
+                                ) orelse
                                 self.findFreeSession() orelse
                                 return error.SessionCapacityExceeded;
 
@@ -374,6 +535,9 @@ pub fn MessageAssembler(
                             session.occupied = true;
                             session.source_address =
                                 identifier.source_address;
+                            session.destination_address = 0xff;
+                            session.target_pgn = bam.target_pgn;
+                            session.delivery = .bam;
 
                             return .{
                                 .bam_started = .{
@@ -404,8 +568,15 @@ pub fn MessageAssembler(
                             frame.data(),
                         );
 
+                    const destination_address =
+                        identifier.destination_address orelse
+                        return error.NoActiveTransfer;
+
                     const session =
-                        self.findSession(identifier.source_address) orelse
+                        self.findSession(
+                            identifier.source_address,
+                            destination_address,
+                        ) orelse
                         return error.NoActiveTransfer;
 
                     const completed =
@@ -416,10 +587,18 @@ pub fn MessageAssembler(
                         );
 
                     if (completed) |message| {
+                        const delivery = session.delivery;
+
                         session.occupied = false;
 
+                        const logical_message = switch (delivery) {
+                            .bam => MessageView.fromBam(message),
+                            .rts_cts => MessageView.fromRtsCts(message),
+                            .single_frame => unreachable,
+                        };
+
                         return .{
-                            .message = MessageView.fromBam(message),
+                            .message = logical_message,
                         };
                     }
 
@@ -439,6 +618,9 @@ pub fn MessageAssembler(
                 session.reassembler.reset();
                 session.occupied = false;
                 session.source_address = 0;
+                session.destination_address = 0;
+                session.target_pgn = 0;
+                session.delivery = .bam;
             }
         }
     };
@@ -455,6 +637,16 @@ pub const MessageCursor = struct {
         lamps_emitted: bool = false,
     };
 
+    const AddressClaimState = struct {
+        name: address_claim.Name,
+        emitted: bool = false,
+    };
+
+    const ComponentIdentificationState = struct {
+        component: component_identification.ComponentIdentification,
+        emitted: bool = false,
+    };
+
     const Eec1State = struct {
         payload: eec1.PayloadView,
         emitted: bool = false,
@@ -467,6 +659,8 @@ pub const MessageCursor = struct {
     };
 
     const State = union(enum) {
+        component_identification: ComponentIdentificationState,
+        address_claim: AddressClaimState,
         eec1: Eec1State,
         dm1: Dm1State,
         unsupported: UnsupportedState,
@@ -475,6 +669,38 @@ pub const MessageCursor = struct {
     pub fn init(
         message: MessageView,
     ) MessageDecodeError!MessageCursor {
+        if (message.pgn() == pgn_address_claimed) {
+            const name =
+                try address_claim.parse(
+                    message.data(),
+                );
+
+            return .{
+                .source_address = message.sourceAddress(),
+                .delivery_method = message.delivery(),
+                .state = .{
+                    .address_claim = .{
+                        .name = name,
+                    },
+                },
+            };
+        }
+        if (message.pgn() == pgn_component_identification) {
+            const component =
+                try component_identification.parse(
+                    message.data(),
+                );
+
+            return .{
+                .source_address = message.sourceAddress(),
+                .delivery_method = message.delivery(),
+                .state = .{
+                    .component_identification = .{
+                        .component = component,
+                    },
+                },
+            };
+        }
         if (message.pgn() == pgn_electronic_engine_controller_1) {
             const payload =
                 try eec1.PayloadView.fromData(
@@ -525,6 +751,45 @@ pub const MessageCursor = struct {
         self: *MessageCursor,
     ) MessageDecodeError!?MessageEvent {
         switch (self.state) {
+            .address_claim => |*state| {
+                if (state.emitted) {
+                    return null;
+                }
+
+                state.emitted = true;
+
+                return .{
+                    .observation = .{
+                        .address_claim = .{
+                            .source_address = self.source_address,
+                            .delivery = self.delivery_method,
+                            .name = state.name,
+                        },
+                    },
+                };
+            },
+
+            .component_identification => |*state| {
+                if (state.emitted) {
+                    return null;
+                }
+
+                state.emitted = true;
+
+                return .{
+                    .observation = .{
+                        .component_identification = .{
+                            .source_address = self.source_address,
+                            .delivery = self.delivery_method,
+                            .make = state.component.make,
+                            .model = state.component.model,
+                            .serial_number = state.component.serial_number,
+                            .unit_number = state.component.unit_number,
+                        },
+                    },
+                };
+            },
+
             .eec1 => |*state| {
                 if (state.emitted) {
                     return null;
@@ -1109,6 +1374,75 @@ test "unsupported logical message preserves payload evidence" {
     );
 }
 
+test "message cursor emits address claim observation" {
+    const payload = [_]u8{
+        0x64, 0x00, 0x40, 0x00,
+        0x00, 0x03, 0x03, 0x10,
+    };
+
+    const can_frame =
+        try can.FrameView.fromParts(
+            0x18eeff80,
+            .extended,
+            .data,
+            8,
+            &payload,
+        );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    const message =
+        MessageView.fromSingleFrame(frame);
+
+    var cursor =
+        try MessageCursor.init(message);
+
+    const event =
+        (try cursor.next()).?;
+
+    switch (event) {
+        .observation => |observation| {
+            switch (observation) {
+                .address_claim => |claim| {
+                    try std.testing.expectEqual(
+                        @as(u8, 0x80),
+                        claim.source_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        MessageDelivery.single_frame,
+                        claim.delivery,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(u64, 0x1003030000400064),
+                        claim.name.raw,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(u32, 100),
+                        claim.name.identityNumber(),
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(u16, 2),
+                        claim.name.manufacturerCode(),
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
+    );
+}
+
 test "message cursor emits EEC1 engine speed observation" {
     const payload = [_]u8{
         0xff,
@@ -1464,6 +1798,359 @@ test "rejects BAM announcement that is not globally addressed" {
     );
 }
 
+test "message assembler releases incomplete RTS CTS session on abort" {
+    const rts_data = [_]u8{
+        0x10, 0x21, 0x00, 0x05,
+        0xff, 0xeb, 0xfe, 0x00,
+    };
+
+    const abort_data = [_]u8{
+        0xff, 0xff, 0xff, 0xff,
+        0xff, 0xeb, 0xfe, 0x00,
+    };
+
+    const rts_can_frame = try can.FrameView.fromParts(
+        0x1cecf900,
+        .extended,
+        .data,
+        8,
+        &rts_data,
+    );
+
+    // Reverse direction: receiver F9 aborts transfer from source 00.
+    const abort_can_frame = try can.FrameView.fromParts(
+        0x1cec00f9,
+        .extended,
+        .data,
+        8,
+        &abort_data,
+    );
+
+    const rts_frame =
+        try FrameView.fromCanFrame(rts_can_frame);
+
+    const abort_frame =
+        try FrameView.fromCanFrame(abort_can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    try std.testing.expect(
+        try assembler.pushFrame(rts_frame) == null,
+    );
+
+    const abort_event =
+        (try assembler.pushFrame(abort_frame)).?;
+
+    switch (abort_event) {
+        .transport_aborted => |aborted| {
+            try std.testing.expectEqual(
+                @as(u8, 0xf9),
+                aborted.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                aborted.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, 0x00feeb),
+                aborted.target_pgn,
+            );
+
+            try std.testing.expect(
+                aborted.matched_active_session,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The abort must actually release the transfer state.
+    try std.testing.expect(
+        try assembler.pushFrame(rts_frame) == null,
+    );
+}
+
+test "message assembler reconstructs authentic RTS CTS component identification transfer" {
+    const rts_data = [_]u8{
+        0x10, 0x21, 0x00, 0x05,
+        0xff, 0xeb, 0xfe, 0x00,
+    };
+
+    const cts_data = [_]u8{
+        0x11, 0x05, 0x01, 0xff,
+        0xff, 0xeb, 0xfe, 0x00,
+    };
+
+    const abort_data = [_]u8{
+        0xff, 0xff, 0xff, 0xff,
+        0xff, 0xeb, 0xfe, 0x00,
+    };
+
+    const packet_1_data = [_]u8{
+        0x01, 0x44, 0x54, 0x44,
+        0x53, 0x43, 0x2a, 0x34,
+    };
+
+    const packet_2_data = [_]u8{
+        0x02, 0x37, 0x31, 0x4e,
+        0x31, 0x30, 0x2a, 0x53,
+    };
+
+    const packet_3_data = [_]u8{
+        0x03, 0x30, 0x30, 0x36,
+        0x36, 0x39, 0x35, 0x31,
+    };
+
+    const packet_4_data = [_]u8{
+        0x04, 0x2a, 0x36, 0x31,
+        0x31, 0x30, 0x33, 0x35,
+    };
+
+    const packet_5_data = [_]u8{
+        0x05, 0x00, 0x00, 0x00,
+        0x00, 0x2a, 0xff, 0xff,
+    };
+
+    const rts_can_frame = try can.FrameView.fromParts(
+        0x1cecf900,
+        .extended,
+        .data,
+        8,
+        &rts_data,
+    );
+
+    const cts_can_frame = try can.FrameView.fromParts(
+        0x1cec00f9,
+        .extended,
+        .data,
+        8,
+        &cts_data,
+    );
+
+    const abort_can_frame = try can.FrameView.fromParts(
+        0x1cecf900,
+        .extended,
+        .data,
+        8,
+        &abort_data,
+    );
+
+    const packet_1_can_frame = try can.FrameView.fromParts(
+        0x1cebf900,
+        .extended,
+        .data,
+        8,
+        &packet_1_data,
+    );
+
+    const packet_2_can_frame = try can.FrameView.fromParts(
+        0x1cebf900,
+        .extended,
+        .data,
+        8,
+        &packet_2_data,
+    );
+
+    const packet_3_can_frame = try can.FrameView.fromParts(
+        0x1cebf900,
+        .extended,
+        .data,
+        8,
+        &packet_3_data,
+    );
+
+    const packet_4_can_frame = try can.FrameView.fromParts(
+        0x1cebf900,
+        .extended,
+        .data,
+        8,
+        &packet_4_data,
+    );
+
+    const packet_5_can_frame = try can.FrameView.fromParts(
+        0x1cebf900,
+        .extended,
+        .data,
+        8,
+        &packet_5_data,
+    );
+
+    const rts_frame =
+        try FrameView.fromCanFrame(rts_can_frame);
+    const cts_frame =
+        try FrameView.fromCanFrame(cts_can_frame);
+    const abort_frame =
+        try FrameView.fromCanFrame(abort_can_frame);
+    const packet_1 =
+        try FrameView.fromCanFrame(packet_1_can_frame);
+    const packet_2 =
+        try FrameView.fromCanFrame(packet_2_can_frame);
+    const packet_3 =
+        try FrameView.fromCanFrame(packet_3_can_frame);
+    const packet_4 =
+        try FrameView.fromCanFrame(packet_4_can_frame);
+    const packet_5 =
+        try FrameView.fromCanFrame(packet_5_can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    try std.testing.expect(
+        try assembler.pushFrame(rts_frame) == null,
+    );
+
+    const cts_event =
+        (try assembler.pushFrame(cts_frame)).?;
+
+    switch (cts_event) {
+        .unsupported_transport_control => |unsupported| {
+            try std.testing.expectEqual(
+                @as(u8, 0x11),
+                unsupported.control,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try assembler.pushFrame(packet_1) == null,
+    );
+    try std.testing.expect(
+        try assembler.pushFrame(packet_2) == null,
+    );
+    try std.testing.expect(
+        try assembler.pushFrame(packet_3) == null,
+    );
+    try std.testing.expect(
+        try assembler.pushFrame(packet_4) == null,
+    );
+
+    const completed_event =
+        (try assembler.pushFrame(packet_5)).?;
+
+    const message = switch (completed_event) {
+        .message => |message| message,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expectEqual(
+        @as(u32, 0x00feeb),
+        message.pgn(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 0x00),
+        message.sourceAddress(),
+    );
+
+    try std.testing.expectEqual(
+        MessageDelivery.rts_cts,
+        message.delivery(),
+    );
+
+    const expected_payload = [_]u8{
+        0x44, 0x54, 0x44, 0x53, 0x43, 0x2a, 0x34,
+        0x37, 0x31, 0x4e, 0x31, 0x30, 0x2a, 0x53,
+        0x30, 0x30, 0x36, 0x36, 0x39, 0x35, 0x31,
+        0x2a, 0x36, 0x31, 0x31, 0x30, 0x33, 0x35,
+        0x00, 0x00, 0x00, 0x00, 0x2a,
+    };
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_payload,
+        message.data(),
+    );
+
+    var cursor =
+        try MessageCursor.init(message);
+
+    const event =
+        (try cursor.next()).?;
+
+    switch (event) {
+        .observation => |observation| {
+            switch (observation) {
+                .component_identification => |component| {
+                    try std.testing.expectEqual(
+                        @as(u8, 0x00),
+                        component.source_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        MessageDelivery.rts_cts,
+                        component.delivery,
+                    );
+
+                    try std.testing.expectEqualStrings(
+                        "DTDSC",
+                        component.make,
+                    );
+
+                    try std.testing.expectEqualStrings(
+                        "471N10",
+                        component.model,
+                    );
+
+                    try std.testing.expectEqualStrings(
+                        "S0066951",
+                        component.serial_number,
+                    );
+
+                    const expected_unit_number = [_]u8{
+                        '6',  '1',  '1',  '0',  '3', '5',
+                        0x00, 0x00, 0x00, 0x00,
+                    };
+
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &expected_unit_number,
+                        component.unit_number,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
+    );
+
+    const abort_event =
+        (try assembler.pushFrame(abort_frame)).?;
+
+    switch (abort_event) {
+        .transport_aborted => |aborted| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                aborted.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf9),
+                aborted.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, 0x00feeb),
+                aborted.target_pgn,
+            );
+
+            try std.testing.expect(
+                !aborted.matched_active_session,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "message assembler keeps overlapping BAM sessions isolated by source" {
     const bam_a_data = [_]u8{
         0x20,
@@ -1638,6 +2325,32 @@ test "message assembler keeps overlapping BAM sessions isolated by source" {
     try std.testing.expectEqual(
         @as(u32, 0x00feeb),
         a_message.pgn(),
+    );
+}
+
+test "classifies Address Claimed PGN" {
+    const data = [_]u8{
+        0x64, 0x00, 0x40, 0x00,
+        0x00, 0x03, 0x03, 0x10,
+    };
+
+    const can_frame =
+        try can.FrameView.fromParts(
+            0x18eeff80,
+            .extended,
+            .data,
+            8,
+            &data,
+        );
+
+    const frame =
+        try FrameView.fromCanFrame(
+            can_frame,
+        );
+
+    try std.testing.expectEqual(
+        PgnClassification.address_claimed,
+        frame.pgnClassification(),
     );
 }
 

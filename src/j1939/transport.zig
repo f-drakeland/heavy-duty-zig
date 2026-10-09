@@ -2,12 +2,27 @@ const std = @import("std");
 
 pub const reassembly = @import("transport_reassembly.zig");
 
+pub const abort_control: u8 = 0xff;
+pub const rts_control: u8 = 0x10;
 pub const bam_control: u8 = 0x20;
 pub const frame_data_length: usize = 8;
 
 pub const ParseError = error{
     InvalidLength,
     InvalidSequenceNumber,
+};
+
+pub const ConnectionAbort = struct {
+    reason: u8,
+    reserved: [3]u8,
+    target_pgn: u32,
+};
+
+pub const RequestToSend = struct {
+    total_message_size: u16,
+    packet_count: u8,
+    max_packets_per_cts: u8,
+    target_pgn: u32,
 };
 
 pub const BamAnnouncement = struct {
@@ -23,6 +38,8 @@ pub const UnsupportedConnectionManagement = struct {
 };
 
 pub const ConnectionManagement = union(enum) {
+    abort: ConnectionAbort,
+    rts: RequestToSend,
     bam: BamAnnouncement,
     unsupported: UnsupportedConnectionManagement,
 };
@@ -41,15 +58,6 @@ pub fn parseConnectionManagementData(
 
     const control = data[0];
 
-    if (control != bam_control) {
-        return .{
-            .unsupported = .{
-                .control = control,
-                .data = data,
-            },
-        };
-    }
-
     const total_message_size: u16 =
         @as(u16, data[1]) |
         (@as(u16, data[2]) << 8);
@@ -59,12 +67,42 @@ pub fn parseConnectionManagementData(
         (@as(u32, data[6]) << 8) |
         (@as(u32, data[7]) << 16);
 
-    return .{
-        .bam = .{
-            .total_message_size = total_message_size,
-            .packet_count = data[3],
-            .reserved = data[4],
-            .target_pgn = target_pgn,
+    return switch (control) {
+        abort_control => .{
+            .abort = .{
+                .reason = data[1],
+                .reserved = .{
+                    data[2],
+                    data[3],
+                    data[4],
+                },
+                .target_pgn = target_pgn,
+            },
+        },
+
+        rts_control => .{
+            .rts = .{
+                .total_message_size = total_message_size,
+                .packet_count = data[3],
+                .max_packets_per_cts = data[4],
+                .target_pgn = target_pgn,
+            },
+        },
+
+        bam_control => .{
+            .bam = .{
+                .total_message_size = total_message_size,
+                .packet_count = data[3],
+                .reserved = data[4],
+                .target_pgn = target_pgn,
+            },
+        },
+
+        else => .{
+            .unsupported = .{
+                .control = control,
+                .data = data,
+            },
         },
     };
 }
@@ -90,6 +128,44 @@ pub fn parseDataTransferData(
 
 test {
     _ = reassembly;
+}
+
+test "parses authentic connection abort data" {
+    const data = [_]u8{
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const result =
+        try parseConnectionManagementData(&data);
+
+    switch (result) {
+        .abort => |abort| {
+            try std.testing.expectEqual(
+                @as(u8, 0xff),
+                abort.reason,
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &[_]u8{ 0xff, 0xff, 0xff },
+                &abort.reserved,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, 0x00feeb),
+                abort.target_pgn,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "parses BAM connection-management data" {
@@ -134,9 +210,51 @@ test "parses BAM connection-management data" {
     }
 }
 
-test "unsupported connection-management control remains visible" {
+test "parses authentic RTS connection-management data" {
     const data = [_]u8{
         0x10,
+        0x21,
+        0x00,
+        0x05,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const result =
+        try parseConnectionManagementData(&data);
+
+    switch (result) {
+        .rts => |rts| {
+            try std.testing.expectEqual(
+                @as(u16, 33),
+                rts.total_message_size,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 5),
+                rts.packet_count,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xff),
+                rts.max_packets_per_cts,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, 0x00feeb),
+                rts.target_pgn,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "unsupported connection-management control remains visible" {
+    const data = [_]u8{
+        0x11,
         0,
         0,
         0,
@@ -152,7 +270,7 @@ test "unsupported connection-management control remains visible" {
     switch (result) {
         .unsupported => |unsupported| {
             try std.testing.expectEqual(
-                @as(u8, 0x10),
+                @as(u8, 0x11),
                 unsupported.control,
             );
 
