@@ -7,7 +7,10 @@ interpreting heavy-duty commercial vehicle network data.
 
 ## Current scope
 
-Initial support focuses on J1708/J1587:
+Heavy Duty Zig currently supports diagnostic evidence extraction from
+J1708/J1587 and J1939 captures.
+
+### J1708/J1587
 
 - checksum-stripped variable-length J1587 message parsing
 - PID 192 multisection reassembly
@@ -17,14 +20,30 @@ Initial support focuses on J1708/J1587:
 - PID 245 total vehicle distance
 - PID 194 diagnostic code table decoding
 - active/inactive fault status
-- PID/SID identifcation
+- PID/SID identification
 - FMI decoding
 - occurrence count handling
-- page-two identfier expansion
+- page-two identifier expansion
 - stateful J1587 message decoding
 - automatic PID 192 multisection handling
 - typed observation delivery from raw J1587 messages
 - explicit handling of unsupported valid parameters
+
+### J1939
+
+- 29-bit J1939 identifier parsing and PGN classification
+- single-frame logical message handling
+- BAM transport reassembly
+- passive reconstruction of directed RTS-initiated transport
+- transport session separation by source and destination
+- transport abort observation and session cleanup
+- DM1 lamp and diagnostic trouble code decoding
+- EEC1 engine-speed observations
+- Address Claimed PGN decoding
+- raw J1939 NAME preservation and typed NAME fields
+- Component Identification PGN decoding
+- typed observation delivery from reconstructed J1939 messages
+- explicit preservation of unsupported PGNs and transport controls
 
 ## Design
 
@@ -32,6 +51,10 @@ Protocol layers report protocol facts.
 
 Higher-level diagnostic code is responsible for assigning meaning to those
 facts.
+
+Network addresses, protocol identities, component-identification fields, and
+other observations remain evidence. Heavy Duty Zig does not assume that a
+source address alone permanently identifies a physical ECU.
 
 Heavy Duty Zig is intentionally separate from Trailer Fingerprint Software.
 TFS may eventually consume this library, but Heavy Duty Zig does not contain
@@ -41,15 +64,40 @@ trailer fingerprinting logic.
 
 Early development.
 
-Current input begins after physical-layer decoding and checksum handling.
+Current input begins after physical-layer decoding. J1708 input currently
+expects checksum handling to have already occurred, and J1939 input begins
+with decoded CAN frames or supported capture records.
 
-Heavy Duty Zig can accept checksum-stripped J1587 messages, reassemble PID 192
-multisection parameters, and expose typed observations for software
-identification, VIN, component identification, vehicle distance, and PID 194
-diagnostic codes.
+Heavy Duty Zig can currently turn supported J1708/J1587 and J1939 traffic into
+typed diagnostic observations. J1939 logical messages may arrive directly,
+through BAM reassembly, or through passive reconstruction of directed
+RTS-initiated transport.
 
-Valid but unsupported J1587 parameters are reported separately from malformed
-input.
+Directed J1939 transport support is currently passive and evidence-oriented.
+Heavy Duty Zig can reconstruct observed payloads and track transport aborts,
+but it does not implement an active RTS/CTS endpoint or claim successful
+transport completion merely because all payload bytes were observed.
 
-Live J1708/J1939 transport, cross-observation correlation, active diagnostic
-requests, fault clearing, and programming operations are not implemented yet.
+Cross-observation correlation, active diagnostic requests, fault clearing,
+programming operations, and physical-layer acquisition are not implemented
+yet.
+
+## Tracking
+
+Current diagnostic direction:
+
+1. Correlate observations without prematurely treating network addresses as
+   permanent ECU identity.
+2. Build a passive network/controller inventory from observed evidence such as
+   source address, J1939 NAME, component identification, diagnostic messages,
+   telemetry, and transport relationships.
+3. Add further PGN or parameter decoding when authentic capture evidence shows
+   that it materially improves diagnosis or controller identification.
+4. Preserve unsupported and ambiguous evidence instead of silently assigning
+   higher-level meaning.
+
+The next architectural problem is cross-observation correlation: determining
+which observations can safely be associated with the same observed network
+participant while preserving the distinction between network address,
+controller-application identity, component identity, and physical ECU
+identity.
