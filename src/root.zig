@@ -1,5 +1,6 @@
 pub const can = @import("can.zig");
 pub const isotp = @import("isotp.zig");
+pub const uds = @import("uds.zig");
 pub const candump = @import("candump.zig");
 pub const ddec_csv = @import("ddec_csv.zig");
 const candump_audit = @import("candump_audit.zig");
@@ -16,6 +17,7 @@ pub const capture_pipeline = @import("capture_pipeline.zig");
 test {
     _ = can;
     _ = isotp;
+    _ = uds;
     _ = candump;
     _ = ddec_csv;
     _ = candump_audit;

@@ -4,6 +4,7 @@ const Io = std.Io;
 
 const ddec_csv = @import("ddec_csv.zig");
 const isotp = @import("isotp.zig");
+const uds = @import("uds.zig");
 
 // Operational bound for this whole-file developer CLI.
 // This is not a DDEC, CAN, or ISO-TP protocol limit.
@@ -15,6 +16,116 @@ const max_capture_bytes =
 const pair_inventory_capacity = 64;
 const session_capacity = 16;
 const payload_capacity = 4095;
+
+const uds_inventory_capacity = 64;
+
+const UdsInventoryError = error{
+    UdsInventoryCapacityExceeded,
+};
+
+const UdsInventory = struct {
+    const Kind = enum {
+        request_or_service,
+        positive_response,
+        negative_response,
+    };
+
+    const Entry = struct {
+        occupied: bool = false,
+
+        source_address: u8 = 0,
+        destination_address: u8 = 0,
+
+        kind: Kind = .request_or_service,
+
+        service_id: u8 = 0,
+
+        request_service_id: ?u8 = null,
+        response_code: ?u8 = null,
+
+        message_count: usize = 0,
+    };
+
+    entries: [uds_inventory_capacity]Entry =
+        @splat(.{}),
+
+    entry_count: usize = 0,
+
+    fn observe(
+        self: *UdsInventory,
+        source_address: u8,
+        destination_address: u8,
+        message: uds.Message,
+    ) UdsInventoryError!void {
+        const kind: Kind = switch (message) {
+            .service => |service| if (service.positive_response_to != null)
+                .positive_response
+            else
+                .request_or_service,
+
+            .negative_response => .negative_response,
+        };
+
+        const service_id: u8 = switch (message) {
+            .service => |service| service.service_id,
+
+            .negative_response => 0x7f,
+        };
+
+        const request_service_id: ?u8 =
+            switch (message) {
+                .service => |service| service.positive_response_to,
+
+                .negative_response => |negative| negative.request_service_id,
+            };
+
+        const response_code: ?u8 =
+            switch (message) {
+                .service => null,
+
+                .negative_response => |negative| negative.response_code,
+            };
+
+        for (&self.entries) |*entry| {
+            if (entry.occupied and
+                entry.source_address ==
+                    source_address and
+                entry.destination_address ==
+                    destination_address and
+                entry.kind == kind and
+                entry.service_id ==
+                    service_id and
+                entry.request_service_id ==
+                    request_service_id and
+                entry.response_code ==
+                    response_code)
+            {
+                entry.message_count += 1;
+                return;
+            }
+        }
+
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) {
+                entry.* = .{
+                    .occupied = true,
+                    .source_address = source_address,
+                    .destination_address = destination_address,
+                    .kind = kind,
+                    .service_id = service_id,
+                    .request_service_id = request_service_id,
+                    .response_code = response_code,
+                    .message_count = 1,
+                };
+
+                self.entry_count += 1;
+                return;
+            }
+        }
+
+        return error.UdsInventoryCapacityExceeded;
+    }
+};
 
 const PairInventoryError = error{
     PairInventoryCapacityExceeded,
@@ -175,6 +286,9 @@ pub fn main(
     var consecutive_frames: usize = 0;
     var flow_control_frames: usize = 0;
     var unsupported_pci_frames: usize = 0;
+    var uds_messages: usize = 0;
+    var uds_parse_rejected: usize = 0;
+    var negative_responses: usize = 0;
 
     var isotp_parse_rejected: usize = 0;
 
@@ -193,6 +307,7 @@ pub fn main(
     var session_capacity_exceeded: usize = 0;
 
     var pairs = PairInventory{};
+    var uds_inventory = UdsInventory{};
 
     var router =
         isotp.SessionRouter(
@@ -372,6 +487,37 @@ pub fn main(
                         pair.completed_multi_messages += 1;
                     },
                 }
+
+                const uds_message =
+                    uds.parse(
+                        message.payload,
+                    ) catch {
+                        uds_parse_rejected += 1;
+                        continue;
+                    };
+
+                uds_messages += 1;
+
+                switch (uds_message) {
+                    .negative_response => {
+                        negative_responses += 1;
+                    },
+
+                    .service => {},
+                }
+
+                uds_inventory.observe(
+                    message.source_address,
+                    message.destination_address,
+                    uds_message,
+                ) catch |err| {
+                    std.debug.print(
+                        "UDS inventory error: {s}\n",
+                        .{@errorName(err)},
+                    );
+
+                    return;
+                };
             },
 
             .flow_control => |flow_control| {
@@ -404,6 +550,9 @@ pub fn main(
         \\completed messages: {}
         \\completed single-frame messages: {}
         \\completed multi-frame messages: {}
+        \\UDS messages: {}
+        \\UDS parse rejected: {}
+        \\negative responses: {}
         \\matched flow controls: {}
         \\unmatched flow controls: {}
         \\capacity exceeded: {}
@@ -431,6 +580,9 @@ pub fn main(
             completed_messages,
             completed_single_messages,
             completed_multi_messages,
+            uds_messages,
+            uds_parse_rejected,
+            negative_responses,
             matched_flow_controls,
             unmatched_flow_controls,
             capacity_exceeded,
@@ -478,5 +630,55 @@ pub fn main(
                 entry.unmatched_flow_controls,
             },
         );
+    }
+    std.debug.print(
+        "\nUDS service inventory:\n",
+        .{},
+    );
+
+    for (uds_inventory.entries) |entry| {
+        if (!entry.occupied) {
+            continue;
+        }
+
+        switch (entry.kind) {
+            .request_or_service => {
+                std.debug.print(
+                    "  {X:0>2} -> {X:0>2}: SID 0x{X:0>2}: {} messages\n",
+                    .{
+                        entry.source_address,
+                        entry.destination_address,
+                        entry.service_id,
+                        entry.message_count,
+                    },
+                );
+            },
+
+            .positive_response => {
+                std.debug.print(
+                    "  {X:0>2} -> {X:0>2}: SID 0x{X:0>2} positive to 0x{X:0>2}: {} messages\n",
+                    .{
+                        entry.source_address,
+                        entry.destination_address,
+                        entry.service_id,
+                        entry.request_service_id.?,
+                        entry.message_count,
+                    },
+                );
+            },
+
+            .negative_response => {
+                std.debug.print(
+                    "  {X:0>2} -> {X:0>2}: SID 0x7F request 0x{X:0>2} code 0x{X:0>2}: {} messages\n",
+                    .{
+                        entry.source_address,
+                        entry.destination_address,
+                        entry.request_service_id.?,
+                        entry.response_code.?,
+                        entry.message_count,
+                    },
+                );
+            },
+        }
     }
 }
