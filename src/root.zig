@@ -3,6 +3,7 @@ pub const candump = @import("candump.zig");
 const candump_audit = @import("candump_audit.zig");
 const j1939_capture_audit = @import("j1939_capture_audit.zig");
 pub const j1939 = @import("j1939.zig");
+pub const correlation = @import("correlation.zig");
 pub const j1708 = @import("j1708.zig");
 pub const j1587 = @import("j1587.zig");
 pub const frame_recovery = @import("frame_recovery.zig");
@@ -16,6 +17,7 @@ test {
     _ = candump_audit;
     _ = j1939_capture_audit;
     _ = j1939;
+    _ = correlation;
     _ = j1708;
     _ = j1587;
     _ = frame_recovery;
