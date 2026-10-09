@@ -47,6 +47,7 @@ pub fn main(init: std.process.Init) !void {
         \\BAM completed: {}
         \\unsupported transport controls: {}
         \\assembly errors: {}
+        \\EEC1 engine speed observations: {}
         \\DM1 lamp observations: {}
         \\DM1 DTC observations: {}
         \\unsupported PGN messages: {}
@@ -67,6 +68,7 @@ pub fn main(init: std.process.Init) !void {
             audit.bam_completed,
             audit.unsupported_transport_controls,
             audit.assembly_errors,
+            audit.eec1_engine_speed_observations,
             audit.dm1_lamp_observations,
             audit.dm1_dtc_observations,
             audit.unsupported_pgn_messages,

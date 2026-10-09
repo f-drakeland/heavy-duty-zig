@@ -3,12 +3,14 @@ const can = @import("can.zig");
 
 pub const transport = @import("j1939/transport.zig");
 pub const dm1 = @import("j1939/dm1.zig");
+pub const eec1 = @import("j1939/eec1.zig");
 
 pub const pdu2_format_min: u8 = 0xf0;
 
 pub const pgn_transport_data_transfer: u32 = 0x00eb00;
 pub const pgn_transport_connection_management: u32 = 0x00ec00;
 pub const pgn_diagnostic_message_1: u32 = 0x00feca;
+pub const pgn_electronic_engine_controller_1: u32 = 0x00f004;
 
 pub const ParseError = error{
     StandardIdentifierNotJ1939,
@@ -23,6 +25,7 @@ pub const PduKind = enum {
 pub const PgnClassification = union(enum) {
     transport_data_transfer,
     transport_connection_management,
+    electronic_engine_controller_1,
     diagnostic_message_1,
     unsupported: u32,
 };
@@ -45,7 +48,15 @@ pub const Dm1DiagnosticTroubleCodeObservation = struct {
     trouble_code: dm1.DiagnosticTroubleCode,
 };
 
+pub const Eec1EngineSpeedObservation = struct {
+    source_address: u8,
+    delivery: MessageDelivery,
+    raw: u16,
+    rpm: f64,
+};
+
 pub const Observation = union(enum) {
+    eec1_engine_speed: Eec1EngineSpeedObservation,
     dm1_lamps: Dm1LampObservation,
     dm1_diagnostic_trouble_code: Dm1DiagnosticTroubleCodeObservation,
 };
@@ -92,13 +103,16 @@ pub const MessageAssemblyError =
 
 pub const MessageDecodeError =
     dm1.PayloadError ||
-    dm1.ParseError;
+    dm1.ParseError ||
+    eec1.ParseError;
 
 pub fn classifyPgn(pgn: u32) PgnClassification {
     return switch (pgn) {
         pgn_transport_data_transfer => .transport_data_transfer,
 
         pgn_transport_connection_management => .transport_connection_management,
+
+        pgn_electronic_engine_controller_1 => .electronic_engine_controller_1,
 
         pgn_diagnostic_message_1 => .diagnostic_message_1,
 
@@ -441,6 +455,11 @@ pub const MessageCursor = struct {
         lamps_emitted: bool = false,
     };
 
+    const Eec1State = struct {
+        payload: eec1.PayloadView,
+        emitted: bool = false,
+    };
+
     const UnsupportedState = struct {
         pgn: u32,
         data: []const u8,
@@ -448,6 +467,7 @@ pub const MessageCursor = struct {
     };
 
     const State = union(enum) {
+        eec1: Eec1State,
         dm1: Dm1State,
         unsupported: UnsupportedState,
     };
@@ -455,6 +475,22 @@ pub const MessageCursor = struct {
     pub fn init(
         message: MessageView,
     ) MessageDecodeError!MessageCursor {
+        if (message.pgn() == pgn_electronic_engine_controller_1) {
+            const payload =
+                try eec1.PayloadView.fromData(
+                    message.data(),
+                );
+
+            return .{
+                .source_address = message.sourceAddress(),
+                .delivery_method = message.delivery(),
+                .state = .{
+                    .eec1 = .{
+                        .payload = payload,
+                    },
+                },
+            };
+        }
         if (message.pgn() != pgn_diagnostic_message_1) {
             return .{
                 .source_address = message.sourceAddress(),
@@ -489,6 +525,33 @@ pub const MessageCursor = struct {
         self: *MessageCursor,
     ) MessageDecodeError!?MessageEvent {
         switch (self.state) {
+            .eec1 => |*state| {
+                if (state.emitted) {
+                    return null;
+                }
+
+                state.emitted = true;
+
+                const raw =
+                    state.payload.engineSpeedRaw() orelse
+                    return null;
+
+                const rpm =
+                    state.payload.engineSpeedRpm() orelse
+                    return null;
+
+                return .{
+                    .observation = .{
+                        .eec1_engine_speed = .{
+                            .source_address = self.source_address,
+                            .delivery = self.delivery_method,
+                            .raw = raw,
+                            .rpm = rpm,
+                        },
+                    },
+                };
+            },
+
             .unsupported => |*unsupported| {
                 if (unsupported.emitted) {
                     return null;
@@ -784,12 +847,12 @@ test "classifies DM1 PGN" {
 
 test "unsupported PGN preserves numeric value" {
     const classification =
-        classifyPgn(0x00f004);
+        classifyPgn(0x00f123);
 
     switch (classification) {
         .unsupported => |pgn| {
             try std.testing.expectEqual(
-                @as(u32, 0x00f004),
+                @as(u32, 0x00f123),
                 pgn,
             );
         },
@@ -996,7 +1059,7 @@ test "unsupported logical message preserves payload evidence" {
     };
 
     const can_frame = try can.FrameView.fromParts(
-        0x18f00480,
+        0x18f12380,
         .extended,
         .data,
         8,
@@ -1017,7 +1080,7 @@ test "unsupported logical message preserves payload evidence" {
     switch (event) {
         .unsupported_pgn => |unsupported| {
             try std.testing.expectEqual(
-                @as(u32, 0x00f004),
+                @as(u32, 0x00f123),
                 unsupported.pgn,
             );
 
@@ -1036,6 +1099,75 @@ test "unsupported logical message preserves payload evidence" {
                 &payload,
                 unsupported.data,
             );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
+    );
+}
+
+test "message cursor emits EEC1 engine speed observation" {
+    const payload = [_]u8{
+        0xff,
+        0xff,
+        0xff,
+        0xc0,
+        0x25,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18f00480,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    const message =
+        MessageView.fromSingleFrame(frame);
+
+    var cursor =
+        try MessageCursor.init(message);
+
+    const event =
+        (try cursor.next()).?;
+
+    switch (event) {
+        .observation => |observation| {
+            switch (observation) {
+                .eec1_engine_speed => |engine_speed| {
+                    try std.testing.expectEqual(
+                        @as(u8, 0x80),
+                        engine_speed.source_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        MessageDelivery.single_frame,
+                        engine_speed.delivery,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(u16, 0x25c0),
+                        engine_speed.raw,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(f64, 1208.0),
+                        engine_speed.rpm,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
         },
 
         else => return error.TestUnexpectedResult,
@@ -1506,5 +1638,37 @@ test "message assembler keeps overlapping BAM sessions isolated by source" {
     try std.testing.expectEqual(
         @as(u32, 0x00feeb),
         a_message.pgn(),
+    );
+}
+
+test "classifies EEC1 PGN" {
+    const data = [_]u8{
+        0xff,
+        0xff,
+        0xff,
+        0x00,
+        0x20,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const can_frame =
+        try can.FrameView.fromParts(
+            0x18f00400,
+            .extended,
+            .data,
+            8,
+            &data,
+        );
+
+    const frame =
+        try FrameView.fromCanFrame(
+            can_frame,
+        );
+
+    try std.testing.expectEqual(
+        PgnClassification.electronic_engine_controller_1,
+        frame.pgnClassification(),
     );
 }
