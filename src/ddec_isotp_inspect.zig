@@ -18,6 +18,7 @@ const session_capacity = 16;
 const payload_capacity = 4095;
 
 const did_inventory_capacity = 256;
+const did_value_sample_capacity = 256;
 
 const DidInventoryError = error{
     DidInventoryCapacityExceeded,
@@ -29,6 +30,17 @@ const DidInventory = struct {
         did: u16 = 0,
         request_count: usize = 0,
         positive_response_count: usize = 0,
+        value_min_length: usize = 0,
+        value_max_length: usize = 0,
+
+        printable_or_nul_responses: usize = 0,
+
+        first_value: [did_value_sample_capacity]u8 = undefined,
+        first_value_length: usize = 0,
+        first_value_stored: bool = false,
+
+        comparison_limited: bool = false,
+        value_changed: bool = false,
     };
 
     entries: [did_inventory_capacity]Entry =
@@ -67,12 +79,17 @@ const DidInventory = struct {
     fn observePositiveResponse(
         self: *DidInventory,
         did: u16,
+        value: []const u8,
     ) DidInventoryError!void {
         for (&self.entries) |*entry| {
             if (entry.occupied and
                 entry.did == did)
             {
-                entry.positive_response_count += 1;
+                recordPositiveResponse(
+                    entry,
+                    value,
+                );
+
                 return;
             }
         }
@@ -82,8 +99,12 @@ const DidInventory = struct {
                 entry.* = .{
                     .occupied = true,
                     .did = did,
-                    .positive_response_count = 1,
                 };
+
+                recordPositiveResponse(
+                    entry,
+                    value,
+                );
 
                 self.entry_count += 1;
                 return;
@@ -91,6 +112,107 @@ const DidInventory = struct {
         }
 
         return error.DidInventoryCapacityExceeded;
+    }
+
+    fn recordPositiveResponse(
+        entry: *Entry,
+        value: []const u8,
+    ) void {
+        const first_response =
+            entry.positive_response_count == 0;
+
+        entry.positive_response_count += 1;
+
+        if (first_response) {
+            entry.value_min_length = value.len;
+            entry.value_max_length = value.len;
+        } else {
+            entry.value_min_length =
+                @min(
+                    entry.value_min_length,
+                    value.len,
+                );
+
+            entry.value_max_length =
+                @max(
+                    entry.value_max_length,
+                    value.len,
+                );
+        }
+
+        if (isPrintableOrNul(value)) {
+            entry.printable_or_nul_responses += 1;
+        }
+
+        if (first_response) {
+            if (value.len >
+                did_value_sample_capacity)
+            {
+                entry.comparison_limited = true;
+                return;
+            }
+
+            std.mem.copyForwards(
+                u8,
+                entry.first_value[0..value.len],
+                value,
+            );
+
+            entry.first_value_length =
+                value.len;
+
+            entry.first_value_stored = true;
+            return;
+        }
+
+        if (entry.first_value_stored and
+            value.len !=
+                entry.first_value_length)
+        {
+            entry.value_changed = true;
+        }
+
+        if (value.len >
+            did_value_sample_capacity)
+        {
+            entry.comparison_limited = true;
+            return;
+        }
+
+        if (!entry.first_value_stored) {
+            entry.comparison_limited = true;
+            return;
+        }
+
+        if (!std.mem.eql(
+            u8,
+            entry.first_value[0..entry.first_value_length],
+            value,
+        )) {
+            entry.value_changed = true;
+        }
+    }
+
+    fn isPrintableOrNul(
+        value: []const u8,
+    ) bool {
+        if (value.len == 0) {
+            return false;
+        }
+
+        for (value) |byte| {
+            if (byte == 0x00) {
+                continue;
+            }
+
+            if (byte < 0x20 or
+                byte > 0x7e)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 };
 
@@ -657,6 +779,7 @@ pub fn main(
 
                             did_inventory.observePositiveResponse(
                                 did,
+                                service.data[2..],
                             ) catch |err| {
                                 std.debug.print(
                                     "DID response inventory error: {s}\n",
@@ -892,11 +1015,30 @@ pub fn main(
             continue;
         }
 
+        const value_state =
+            if (entry.positive_response_count == 0)
+                "no-response"
+            else if (entry.positive_response_count == 1)
+                "single-observation"
+            else if (entry.value_changed or
+            entry.value_min_length !=
+                entry.value_max_length)
+                "changing"
+            else if (entry.comparison_limited)
+                "comparison-limited"
+            else
+                "stable";
+
         std.debug.print(
-            "  DID 0x{X:0>4}: {} requests, {} positive responses\n",
+            "  DID 0x{X:0>4}: {} requests, {} responses, value len {}..{}, {s}, printable-or-NUL {}/{}\n",
             .{
                 entry.did,
                 entry.request_count,
+                entry.positive_response_count,
+                entry.value_min_length,
+                entry.value_max_length,
+                value_state,
+                entry.printable_or_nul_responses,
                 entry.positive_response_count,
             },
         );
