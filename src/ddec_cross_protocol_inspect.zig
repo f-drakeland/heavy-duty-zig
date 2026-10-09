@@ -12,6 +12,8 @@ const max_capture_bytes =
     64 * 1024 * 1024;
 
 const component_sample_capacity = 16;
+const correlation_evidence_capacity = 256;
+const relationship_capacity = 256;
 const session_capacity = 16;
 const payload_capacity = 4095;
 
@@ -225,7 +227,7 @@ fn inspectUdsMatches(
     text: []const u8,
     samples: *const [component_sample_capacity]OwnedComponentSample,
     sample_count: usize,
-) void {
+) !void {
     var router =
         isotp.SessionRouter(
             session_capacity,
@@ -235,6 +237,21 @@ fn inspectUdsMatches(
     var uds_did_responses: usize = 0;
     var uds_evidence_rejected: usize = 0;
     var exact_matches: usize = 0;
+
+    const CorrelationEvidence =
+        correlation.OwnedCorrelationEvidence(payload_capacity);
+
+    const EvidenceInventory =
+        correlation.CorrelationEvidenceInventory(
+            correlation_evidence_capacity,
+            payload_capacity,
+        );
+
+    const Relationships =
+        correlation.EvidenceRelationshipInventory(relationship_capacity);
+
+    var evidence_inventory: EvidenceInventory = .{};
+    var relationships: Relationships = .{};
 
     var lines =
         std.mem.splitScalar(
@@ -343,6 +360,41 @@ fn inspectUdsMatches(
                         ) orelse
                         continue;
 
+                    const j1939_owned =
+                        (try CorrelationEvidence
+                            .fromJ1939ComponentIdentification(
+                            component,
+                        )) orelse
+                        continue;
+
+                    const j1939_result =
+                        try evidence_inventory.observe(
+                            j1939_owned,
+                        );
+
+                    const uds_owned =
+                        try CorrelationEvidence
+                            .fromUdsDataIdentifier(
+                            uds_evidence,
+                        );
+
+                    const uds_result =
+                        try evidence_inventory.observe(
+                            uds_owned,
+                        );
+
+                    const durable_relationship =
+                        evidence_inventory
+                            .exactPayloadRelationship(
+                            j1939_result.id,
+                            uds_result.id,
+                        ) orelse
+                        return error.DurableRelationshipMismatch;
+
+                    _ = try relationships.record(
+                        durable_relationship,
+                    );
+
                     exact_matches += 1;
 
                     std.debug.print(
@@ -372,6 +424,7 @@ fn inspectUdsMatches(
         \\UDS DID responses examined: {}
         \\UDS DID evidence rejected: {}
         \\exact cross-protocol payload matches: {}
+        \\durable exact-payload relationships preserved: {}
         \\
     ,
         .{
@@ -379,6 +432,7 @@ fn inspectUdsMatches(
             uds_did_responses,
             uds_evidence_rejected,
             exact_matches,
+            relationships.count(),
         },
     );
 }
@@ -422,7 +476,7 @@ pub fn main(
         &component_sample_count,
     );
 
-    inspectUdsMatches(
+    try inspectUdsMatches(
         text,
         &component_samples,
         component_sample_count,
