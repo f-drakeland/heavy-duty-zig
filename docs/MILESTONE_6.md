@@ -100,8 +100,35 @@ Against the current private authentic Class 6 truck capture, HDZ processed
 - 0 assembly errors;
 - 0 decode errors.
 
-The authentic capture contains no populated DM1 trouble-code observations, so
-authentic populated-DTC validation remains outstanding.
+A second authentic J1939 capture was used to validate populated DM1 fault
+evidence. HDZ processed 19,957 records with 0 parse rejections, 0 J1939
+rejections, 0 assembly errors, and 0 decode errors.
+
+That capture contained 91 logical DM1 messages: 59 direct single-frame DM1
+messages and 32 BAM-transported DM1 messages. HDZ produced 91 DM1 lamp
+observations and 94 populated DTC observations.
+
+Independent reconstruction of the transported payloads produced the same
+decoded DTC fields as the normal HDZ pipeline:
+
+- source 0x00: SPN 191 / FMI 9 / occurrence count 8;
+- source 0x00: SPN 84 / FMI 9 / occurrence count 8;
+- source 0x00: SPN 5357 / FMI 31 / occurrence count 1;
+- source 0x31: SPN 96 / FMI 3 / occurrence count 126;
+- source 0x31: SPN 829 / FMI 3 / occurrence count 126.
+
+The authentic validation captures remain external to HDZ. The original Class 6
+capture remains private validation material; the populated-DM1 corpus is
+publicly hosted upstream but is not redistributed with HDZ.
+
+## Milestone status
+
+Milestone 6 is complete.
+
+HDZ now demonstrates a passive CAN/J1939 diagnostic path from authentic capture
+data through CAN framing, J1939 identifier decoding, receive-side transport
+reassembly, logical-message construction, unsupported-evidence preservation,
+typed operating-state observations, and authentic populated DM1 fault decoding.
 
 ## Completion criteria
 
