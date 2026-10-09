@@ -76,6 +76,11 @@ pub const ComponentIdentificationObservation = struct {
     model: []const u8,
     serial_number: []const u8,
     unit_number: []const u8,
+    /// Exact logical-message payload when original bytes are available.
+    ///
+    /// Null means the observation was constructed without preserved original
+    /// logical-message payload evidence.
+    raw_payload: ?[]const u8 = null,
 };
 
 pub const Observation = union(enum) {
@@ -666,6 +671,7 @@ pub const MessageCursor = struct {
 
     const ComponentIdentificationState = struct {
         component: component_identification.ComponentIdentification,
+        raw_payload: []const u8,
         emitted: bool = false,
     };
 
@@ -719,6 +725,7 @@ pub const MessageCursor = struct {
                 .state = .{
                     .component_identification = .{
                         .component = component,
+                        .raw_payload = message.data(),
                     },
                 },
             };
@@ -807,6 +814,7 @@ pub const MessageCursor = struct {
                             .model = state.component.model,
                             .serial_number = state.component.serial_number,
                             .unit_number = state.component.unit_number,
+                            .raw_payload = state.raw_payload,
                         },
                     },
                 };
@@ -2166,6 +2174,16 @@ test "message assembler reconstructs authentic RTS CTS component identification 
                     try std.testing.expectEqual(
                         MessageDelivery.rts_cts,
                         component.delivery,
+                    );
+
+                    try std.testing.expect(
+                        component.raw_payload != null,
+                    );
+
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &expected_payload,
+                        component.raw_payload.?,
                     );
 
                     try std.testing.expectEqualStrings(
