@@ -206,6 +206,136 @@ pub fn OwnedCorrelationEvidence(
     };
 }
 
+/// Capture-local identity of one distinct durable correlation-evidence value.
+///
+/// This identifies evidence stored in a CorrelationEvidenceInventory. It does
+/// not identify a controller, component, vehicle, or physical ECU.
+pub const EvidenceValueId = struct {
+    index: usize,
+
+    pub fn eql(
+        self: EvidenceValueId,
+        other: EvidenceValueId,
+    ) bool {
+        return self.index == other.index;
+    }
+};
+
+pub const CorrelationEvidenceObserveStatus = enum {
+    new_evidence,
+    existing_evidence,
+};
+
+pub const CorrelationEvidenceObserveResult = struct {
+    id: EvidenceValueId,
+    status: CorrelationEvidenceObserveStatus,
+};
+
+pub const CorrelationInventoryError = error{
+    CorrelationEvidenceCapacityExceeded,
+};
+
+/// Bounded capture-local inventory of distinct durable correlation evidence.
+///
+/// Exact repeated values share one EvidenceValueId and increment an occurrence
+/// count. Values that differ by protocol kind or protocol metadata remain
+/// distinct even when their payload bytes are equal.
+pub fn CorrelationEvidenceInventory(
+    comptime evidence_capacity: usize,
+    comptime payload_capacity: usize,
+) type {
+    if (evidence_capacity == 0) {
+        @compileError(
+            "correlation evidence capacity must be greater than zero",
+        );
+    }
+
+    const Owned = OwnedCorrelationEvidence(payload_capacity);
+
+    return struct {
+        const Self = @This();
+
+        pub const EvidenceView = struct {
+            id: EvidenceValueId,
+            evidence: *const Owned,
+            occurrence_count: usize,
+        };
+
+        const Slot = struct {
+            occupied: bool = false,
+            evidence: Owned = undefined,
+            occurrence_count: usize = 0,
+        };
+
+        slots: [evidence_capacity]Slot = @splat(.{}),
+        evidence_count: usize = 0,
+
+        pub fn observe(
+            self: *Self,
+            owned_evidence: Owned,
+        ) CorrelationInventoryError!CorrelationEvidenceObserveResult {
+            for (&self.slots, 0..) |*slot, index| {
+                if (slot.occupied and
+                    slot.evidence.eqlExact(&owned_evidence))
+                {
+                    slot.occurrence_count += 1;
+
+                    return .{
+                        .id = .{ .index = index },
+                        .status = .existing_evidence,
+                    };
+                }
+            }
+
+            for (&self.slots, 0..) |*slot, index| {
+                if (!slot.occupied) {
+                    slot.* = .{
+                        .occupied = true,
+                        .evidence = owned_evidence,
+                        .occurrence_count = 1,
+                    };
+
+                    self.evidence_count += 1;
+
+                    return .{
+                        .id = .{ .index = index },
+                        .status = .new_evidence,
+                    };
+                }
+            }
+
+            return error.CorrelationEvidenceCapacityExceeded;
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.evidence_count;
+        }
+
+        pub fn evidence(
+            self: *const Self,
+            id: EvidenceValueId,
+        ) ?EvidenceView {
+            if (id.index >= evidence_capacity) {
+                return null;
+            }
+
+            const slot = &self.slots[id.index];
+
+            if (!slot.occupied) {
+                return null;
+            }
+
+            return .{
+                .id = id,
+                .evidence = &slot.evidence,
+                .occurrence_count = slot.occurrence_count,
+            };
+        }
+    };
+}
+
 /// Exact equality between an original J1939 Component Identification payload
 /// and the bytes following a UDS data identifier.
 ///
@@ -1246,6 +1376,122 @@ test "owned correlation evidence exact equality includes protocol metadata" {
     );
     try std.testing.expect(
         !j1939_first.eqlExact(&uds_first),
+    );
+}
+
+test "correlation evidence inventory assigns stable IDs to exact values" {
+    const Owned = OwnedCorrelationEvidence(4);
+    const Inventory = CorrelationEvidenceInventory(4, 4);
+
+    var inventory: Inventory = .{};
+
+    const first = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf157,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    const repeated = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf157,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    const first_result = try inventory.observe(first);
+    const repeated_result = try inventory.observe(repeated);
+
+    try std.testing.expectEqual(
+        CorrelationEvidenceObserveStatus.new_evidence,
+        first_result.status,
+    );
+    try std.testing.expectEqual(
+        CorrelationEvidenceObserveStatus.existing_evidence,
+        repeated_result.status,
+    );
+    try std.testing.expect(
+        first_result.id.eql(repeated_result.id),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
+    );
+
+    const view = inventory.evidence(first_result.id).?;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        view.occurrence_count,
+    );
+}
+
+test "correlation evidence inventory keeps equal payloads as distinct protocol values" {
+    const Owned = OwnedCorrelationEvidence(4);
+    const Inventory = CorrelationEvidenceInventory(4, 4);
+
+    var inventory: Inventory = .{};
+
+    const j1939_value =
+        (try Owned.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "",
+            .model = "",
+            .serial_number = "",
+            .unit_number = "",
+            .raw_payload = &.{ 0x11, 0x22, 0x00, 0xff },
+        })).?;
+
+    const uds_value = try Owned.fromUdsDataIdentifier(.{
+        .source_address = 0x00,
+        .destination_address = 0xf1,
+        .delivery = .multi_frame,
+        .data_identifier = 0xf157,
+        .data_after_identifier = &.{ 0x11, 0x22, 0x00, 0xff },
+    });
+
+    const j1939_result = try inventory.observe(j1939_value);
+    const uds_result = try inventory.observe(uds_value);
+
+    try std.testing.expect(
+        !j1939_result.id.eql(uds_result.id),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
+    );
+}
+
+test "correlation evidence inventory reports capacity exhaustion" {
+    const Owned = OwnedCorrelationEvidence(1);
+    const Inventory = CorrelationEvidenceInventory(1, 1);
+
+    var inventory: Inventory = .{};
+
+    _ = try inventory.observe(
+        try Owned.fromUdsDataIdentifier(.{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .single_frame,
+            .data_identifier = 0x0001,
+            .data_after_identifier = &.{0x11},
+        }),
+    );
+
+    try std.testing.expectError(
+        error.CorrelationEvidenceCapacityExceeded,
+        inventory.observe(
+            try Owned.fromUdsDataIdentifier(.{
+                .source_address = 0x00,
+                .destination_address = 0xf1,
+                .delivery = .single_frame,
+                .data_identifier = 0x0002,
+                .data_after_identifier = &.{0x11},
+            }),
+        ),
     );
 }
 
