@@ -168,6 +168,169 @@ fn parseFlowControlFrame(
     };
 }
 
+pub const MessageDelivery = enum {
+    single_frame,
+    multi_frame,
+};
+
+pub const CompletedMessage = struct {
+    payload: []const u8,
+    delivery: MessageDelivery,
+};
+
+pub const ReassemblyError = error{
+    CapacityExceeded,
+    TransferAlreadyActive,
+    NoActiveTransfer,
+    UnexpectedSequenceNumber,
+    UnsupportedFrameType,
+};
+
+/// Bounded passive reassembly for one directional ISO-TP stream.
+///
+/// Session/address routing belongs to the caller. This type only reconstructs
+/// the ISO-TP payload carried by an already-selected stream.
+pub fn Reassembler(
+    comptime capacity: usize,
+) type {
+    return struct {
+        const Self = @This();
+
+        buffer: [capacity]u8 = undefined,
+
+        active: bool = false,
+        message_length: usize = 0,
+        bytes_written: usize = 0,
+        next_sequence_number: u8 = 1,
+
+        pub fn reset(
+            self: *Self,
+        ) void {
+            self.active = false;
+            self.message_length = 0;
+            self.bytes_written = 0;
+            self.next_sequence_number = 1;
+        }
+
+        pub fn push(
+            self: *Self,
+            frame: Frame,
+        ) ReassemblyError!?CompletedMessage {
+            switch (frame) {
+                .single_frame => |single| {
+                    if (self.active) {
+                        return error.TransferAlreadyActive;
+                    }
+
+                    return .{
+                        .payload = single.payload,
+                        .delivery = .single_frame,
+                    };
+                },
+
+                .first_frame => |first| {
+                    if (self.active) {
+                        return error.TransferAlreadyActive;
+                    }
+
+                    const message_length: usize =
+                        first.message_length;
+
+                    if (message_length > capacity) {
+                        return error.CapacityExceeded;
+                    }
+
+                    const copy_length =
+                        @min(
+                            message_length,
+                            first.data.len,
+                        );
+
+                    std.mem.copyForwards(
+                        u8,
+                        self.buffer[0..copy_length],
+                        first.data[0..copy_length],
+                    );
+
+                    self.active = true;
+                    self.message_length = message_length;
+                    self.bytes_written = copy_length;
+                    self.next_sequence_number = 1;
+
+                    if (self.bytes_written ==
+                        self.message_length)
+                    {
+                        self.active = false;
+
+                        return .{
+                            .payload = self.buffer[0..self.message_length],
+                            .delivery = .multi_frame,
+                        };
+                    }
+
+                    return null;
+                },
+
+                .consecutive_frame => |consecutive| {
+                    if (!self.active) {
+                        return error.NoActiveTransfer;
+                    }
+
+                    if (consecutive.sequence_number !=
+                        self.next_sequence_number)
+                    {
+                        return error.UnexpectedSequenceNumber;
+                    }
+
+                    const remaining =
+                        self.message_length -
+                        self.bytes_written;
+
+                    const copy_length =
+                        @min(
+                            remaining,
+                            consecutive.data.len,
+                        );
+
+                    std.mem.copyForwards(
+                        u8,
+                        self.buffer[self.bytes_written .. self.bytes_written +
+                            copy_length],
+                        consecutive.data[0..copy_length],
+                    );
+
+                    self.bytes_written += copy_length;
+
+                    if (self.bytes_written ==
+                        self.message_length)
+                    {
+                        self.active = false;
+
+                        return .{
+                            .payload = self.buffer[0..self.message_length],
+                            .delivery = .multi_frame,
+                        };
+                    }
+
+                    self.next_sequence_number =
+                        (self.next_sequence_number + 1) &
+                        0x0f;
+
+                    return null;
+                },
+
+                .flow_control => {
+                    return null;
+                },
+
+                .unsupported => {
+                    return error.UnsupportedFrameType;
+                },
+            }
+        }
+    };
+}
+
 test "parses authentic DDEC ISO-TP single frame" {
     const data = [_]u8{
         0x02,
@@ -388,4 +551,190 @@ test "reports extended first-frame length as unsupported" {
         error.UnsupportedFirstFrameExtendedLength,
         parse(&data),
     );
+}
+
+test "reassembles authentic DDEC ISO-TP response" {
+    const first_data = [_]u8{
+        0x10, 0x16, 0x62, 0xf1,
+        0x95, 0x00, 0x02, 0x56,
+    };
+
+    const consecutive_1_data = [_]u8{
+        0x21, 0x00, 0x01, 0x52,
+        0x15, 0x00, 0x00, 0x61,
+    };
+
+    const consecutive_2_data = [_]u8{
+        0x22, 0x0a, 0x01, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+    };
+
+    const consecutive_3_data = [_]u8{
+        0x23, 0x00, 0x00, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+    };
+
+    var reassembler =
+        Reassembler(64){};
+
+    try std.testing.expect(
+        try reassembler.push(
+            try parse(&first_data),
+        ) == null,
+    );
+
+    try std.testing.expect(
+        try reassembler.push(
+            try parse(&consecutive_1_data),
+        ) == null,
+    );
+
+    try std.testing.expect(
+        try reassembler.push(
+            try parse(&consecutive_2_data),
+        ) == null,
+    );
+
+    const completed =
+        (try reassembler.push(
+            try parse(&consecutive_3_data),
+        )).?;
+
+    try std.testing.expectEqual(
+        MessageDelivery.multi_frame,
+        completed.delivery,
+    );
+
+    const expected = [_]u8{
+        0x62, 0xf1, 0x95, 0x00,
+        0x02, 0x56, 0x00, 0x01,
+        0x52, 0x15, 0x00, 0x00,
+        0x61, 0x0a, 0x01, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+        0x00, 0x00,
+    };
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected,
+        completed.payload,
+    );
+}
+
+test "reassembly rejects out-of-order consecutive frame" {
+    const first_data = [_]u8{
+        0x10, 0x16,
+        0x62, 0xf1,
+        0x95, 0x00,
+        0x02, 0x56,
+    };
+
+    const wrong_sequence_data = [_]u8{
+        0x22,
+        0x00,
+        0x01,
+        0x52,
+        0x15,
+        0x00,
+        0x00,
+        0x61,
+    };
+
+    var reassembler =
+        Reassembler(64){};
+
+    try std.testing.expect(
+        try reassembler.push(
+            try parse(&first_data),
+        ) == null,
+    );
+
+    try std.testing.expectError(
+        error.UnexpectedSequenceNumber,
+        reassembler.push(
+            try parse(&wrong_sequence_data),
+        ),
+    );
+}
+
+test "reassembly rejects consecutive frame without active transfer" {
+    const consecutive_data = [_]u8{
+        0x21,
+        0x00,
+        0x01,
+        0x52,
+        0x15,
+        0x00,
+        0x00,
+        0x61,
+    };
+
+    var reassembler =
+        Reassembler(64){};
+
+    try std.testing.expectError(
+        error.NoActiveTransfer,
+        reassembler.push(
+            try parse(&consecutive_data),
+        ),
+    );
+}
+
+test "reassembly wraps consecutive sequence number from fifteen to zero" {
+    const first_data = [_]u8{
+        0x10, 0x76,
+        0,    0,
+        0,    0,
+        0,    0,
+    };
+
+    var reassembler =
+        Reassembler(128){};
+
+    try std.testing.expect(
+        try reassembler.push(
+            try parse(&first_data),
+        ) == null,
+    );
+
+    var sequence_number: u8 = 1;
+    var index: usize = 0;
+
+    while (index < 16) : (index += 1) {
+        var data = [_]u8{
+            0x20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        };
+
+        data[0] |= sequence_number;
+
+        const completed =
+            try reassembler.push(
+                try parse(&data),
+            );
+
+        if (index < 15) {
+            try std.testing.expect(
+                completed == null,
+            );
+        } else {
+            try std.testing.expect(
+                completed != null,
+            );
+
+            try std.testing.expectEqual(
+                @as(usize, 0x76),
+                completed.?.payload.len,
+            );
+        }
+
+        sequence_number =
+            (sequence_number + 1) & 0x0f;
+    }
 }
