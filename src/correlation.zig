@@ -1861,3 +1861,197 @@ test "capture correlation view reports endpoint identity evidence" {
         second_endpoint.identity_evidence_count,
     );
 }
+
+test "authentic J1939 capture fragment builds participant correlation" {
+    const candump = @import("candump.zig");
+
+    const text =
+        \\(001.000000) can1 18EEFFF9 [8] 00 00 01 00 00 00 00 00
+        \\(001.010000) can1 18EA00F9 [3] EB FE 00
+        \\(001.020000) can1 1CECF900 [8] 10 21 00 05 FF EB FE 00
+        \\(001.030000) can1 1CEC00F9 [8] 11 05 01 FF FF EB FE 00
+        \\(001.040000) can1 1CEBF900 [8] 01 44 54 44 53 43 2A 34
+        \\(001.050000) can1 1CEBF900 [8] 02 37 31 4E 31 30 2A 53
+        \\(001.060000) can1 1CEBF900 [8] 03 30 30 36 36 39 35 31
+        \\(001.070000) can1 1CEBF900 [8] 04 2A 36 31 31 30 33 35
+        \\(001.080000) can1 1CEBF900 [8] 05 00 00 00 00 2A FF FF
+        \\(001.090000) can1 1CECF900 [8] FF FF FF FF FF EB FE 00
+    ;
+
+    var assembler =
+        j1939.MessageAssembler(
+            64,
+            4,
+        ){};
+
+    var endpoints =
+        EndpointInventory(8){};
+
+    var identities =
+        IdentityEvidenceInventory(
+            8,
+            64,
+        ){};
+
+    var lines =
+        std.mem.splitScalar(
+            u8,
+            text,
+            '\n',
+        );
+
+    while (lines.next()) |line| {
+        const trimmed =
+            std.mem.trim(
+                u8,
+                line,
+                " \t\r",
+            );
+
+        if (trimmed.len == 0) {
+            continue;
+        }
+
+        const record =
+            try candump.parseLine(
+                trimmed,
+            );
+
+        const can_frame =
+            try record.frame();
+
+        const frame =
+            try j1939.FrameView.fromCanFrame(
+                can_frame,
+            );
+
+        const maybe_assembly_event =
+            try assembler.pushFrame(
+                frame,
+            );
+
+        const assembly_event =
+            maybe_assembly_event orelse
+            continue;
+
+        switch (assembly_event) {
+            .message => |message| {
+                var cursor =
+                    try j1939.MessageCursor.init(
+                        message,
+                    );
+
+                while (try cursor.next()) |event| {
+                    switch (event) {
+                        .observation => |observation| {
+                            const endpoint_observation =
+                                fromJ1939(
+                                    observation,
+                                );
+
+                            _ = try endpoints.observe(
+                                endpoint_observation,
+                            );
+
+                            _ = try identities.observe(
+                                endpoint_observation,
+                            );
+                        },
+
+                        .unsupported_pgn => {},
+                    }
+                }
+            },
+
+            else => {},
+        }
+    }
+
+    const View =
+        CaptureCorrelationView(
+            8,
+            8,
+            64,
+        );
+
+    const view =
+        View.init(
+            &endpoints,
+            &identities,
+        );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        view.count(),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        endpoints.observationCount(.{
+            .j1939_source_address = 0xf9,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        endpoints.observationCount(.{
+            .j1939_source_address = 0x00,
+        }),
+    );
+
+    const requester_identity =
+        view.identityEvidenceAt(
+            .{
+                .j1939_source_address = 0xf9,
+            },
+            0,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    switch (requester_identity.observation.evidence) {
+        .j1939_address_claim => |claim| {
+            try std.testing.expectEqual(
+                @as(u64, 0x0000000000010000),
+                claim.name.raw,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const component_identity =
+        view.identityEvidenceAt(
+            .{
+                .j1939_source_address = 0x00,
+            },
+            0,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    switch (component_identity.observation.evidence) {
+        .j1939_component_identification => |component| {
+            try std.testing.expectEqualStrings(
+                "DTDSC",
+                component.fields.field(0),
+            );
+
+            try std.testing.expectEqualStrings(
+                "471N10",
+                component.fields.field(1),
+            );
+
+            try std.testing.expectEqualStrings(
+                "S0066951",
+                component.fields.field(2),
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                "611035\x00\x00\x00\x00",
+                component.fields.field(3),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
