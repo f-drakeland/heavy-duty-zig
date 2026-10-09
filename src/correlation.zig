@@ -49,6 +49,149 @@ pub const EndpointObservation = struct {
     evidence: Evidence,
 };
 
+pub const EndpointSummary = struct {
+    key: EndpointKey,
+    observation_count: usize,
+};
+
+pub const InventoryObserveResult = enum {
+    new_endpoint,
+    existing_endpoint,
+};
+
+pub const InventoryError = error{
+    EndpointCapacityExceeded,
+};
+
+/// Capture-local inventory of observed protocol endpoints.
+///
+/// This inventory retains endpoint keys and observation counts only.
+/// It does not retain borrowed protocol evidence or imply permanent
+/// controller or physical ECU identity.
+pub fn EndpointInventory(
+    comptime capacity: usize,
+) type {
+    if (capacity == 0) {
+        @compileError(
+            "endpoint inventory capacity must be greater than zero",
+        );
+    }
+
+    return struct {
+        const Self = @This();
+
+        const Slot = struct {
+            occupied: bool = false,
+            key: EndpointKey = .{
+                .j1587_mid = 0,
+            },
+            observation_count: usize = 0,
+        };
+
+        slots: [capacity]Slot =
+            @splat(.{}),
+
+        endpoint_count: usize = 0,
+
+        pub fn observe(
+            self: *Self,
+            observation: EndpointObservation,
+        ) InventoryError!InventoryObserveResult {
+            if (self.findSlot(observation.endpoint)) |slot| {
+                slot.observation_count += 1;
+
+                return .existing_endpoint;
+            }
+
+            const slot =
+                self.findFreeSlot() orelse
+                return error.EndpointCapacityExceeded;
+
+            slot.* = .{
+                .occupied = true,
+                .key = observation.endpoint,
+                .observation_count = 1,
+            };
+
+            self.endpoint_count += 1;
+
+            return .new_endpoint;
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.endpoint_count;
+        }
+
+        pub fn endpointAt(
+            self: *const Self,
+            index: usize,
+        ) ?EndpointSummary {
+            var observed_index: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (observed_index == index) {
+                    return .{
+                        .key = slot.key,
+                        .observation_count = slot.observation_count,
+                    };
+                }
+
+                observed_index += 1;
+            }
+
+            return null;
+        }
+
+        pub fn observationCount(
+            self: *const Self,
+            key: EndpointKey,
+        ) ?usize {
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.key.eql(key))
+                {
+                    return slot.observation_count;
+                }
+            }
+
+            return null;
+        }
+
+        fn findSlot(
+            self: *Self,
+            key: EndpointKey,
+        ) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.key.eql(key))
+                {
+                    return slot;
+                }
+            }
+
+            return null;
+        }
+
+        fn findFreeSlot(
+            self: *Self,
+        ) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    return slot;
+                }
+            }
+
+            return null;
+        }
+    };
+}
+
 pub fn fromJ1587(
     observation: j1587.Observation,
 ) EndpointObservation {
@@ -328,4 +471,161 @@ test "authentic J1939 address claim becomes endpoint observation" {
 
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "inventory groups observations from same J1939 endpoint" {
+    const first = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x00,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    const second = fromJ1939(.{
+        .component_identification = .{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "DTDSC",
+            .model = "471N10",
+            .serial_number = "S0066951",
+            .unit_number = "611035",
+        },
+    });
+
+    var inventory = EndpointInventory(4){};
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.new_endpoint,
+        try inventory.observe(first),
+    );
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.existing_endpoint,
+        try inventory.observe(second),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        inventory.observationCount(.{
+            .j1939_source_address = 0x00,
+        }),
+    );
+}
+
+test "inventory keeps same numeric address separate across protocols" {
+    const j1587_observation = fromJ1587(.{
+        .engine_speed = .{
+            .source_mid = 128,
+            .raw_count = 2400,
+            .rpm = 600.0,
+        },
+    });
+
+    const j1939_observation = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 128,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    var inventory = EndpointInventory(4){};
+
+    _ = try inventory.observe(
+        j1587_observation,
+    );
+
+    _ = try inventory.observe(
+        j1939_observation,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        inventory.observationCount(.{
+            .j1587_mid = 128,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        inventory.observationCount(.{
+            .j1939_source_address = 128,
+        }),
+    );
+
+    const first_endpoint =
+        inventory.endpointAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    const second_endpoint =
+        inventory.endpointAt(1) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        first_endpoint.key.eql(.{
+            .j1587_mid = 128,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        first_endpoint.observation_count,
+    );
+
+    try std.testing.expect(
+        second_endpoint.key.eql(.{
+            .j1939_source_address = 128,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        second_endpoint.observation_count,
+    );
+
+    try std.testing.expect(
+        inventory.endpointAt(2) == null,
+    );
+}
+
+test "inventory reports endpoint capacity exhaustion" {
+    const first = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x00,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    const second = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x01,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    var inventory = EndpointInventory(1){};
+
+    _ = try inventory.observe(first);
+
+    try std.testing.expectError(
+        error.EndpointCapacityExceeded,
+        inventory.observe(second),
+    );
 }
