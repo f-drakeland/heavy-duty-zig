@@ -17,6 +17,83 @@ const pair_inventory_capacity = 64;
 const session_capacity = 16;
 const payload_capacity = 4095;
 
+const did_inventory_capacity = 256;
+
+const DidInventoryError = error{
+    DidInventoryCapacityExceeded,
+};
+
+const DidInventory = struct {
+    const Entry = struct {
+        occupied: bool = false,
+        did: u16 = 0,
+        request_count: usize = 0,
+        positive_response_count: usize = 0,
+    };
+
+    entries: [did_inventory_capacity]Entry =
+        @splat(.{}),
+
+    entry_count: usize = 0,
+
+    fn observeRequest(
+        self: *DidInventory,
+        did: u16,
+    ) DidInventoryError!void {
+        for (&self.entries) |*entry| {
+            if (entry.occupied and
+                entry.did == did)
+            {
+                entry.request_count += 1;
+                return;
+            }
+        }
+
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) {
+                entry.* = .{
+                    .occupied = true,
+                    .did = did,
+                    .request_count = 1,
+                };
+
+                self.entry_count += 1;
+                return;
+            }
+        }
+
+        return error.DidInventoryCapacityExceeded;
+    }
+    fn observePositiveResponse(
+        self: *DidInventory,
+        did: u16,
+    ) DidInventoryError!void {
+        for (&self.entries) |*entry| {
+            if (entry.occupied and
+                entry.did == did)
+            {
+                entry.positive_response_count += 1;
+                return;
+            }
+        }
+
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) {
+                entry.* = .{
+                    .occupied = true,
+                    .did = did,
+                    .positive_response_count = 1,
+                };
+
+                self.entry_count += 1;
+                return;
+            }
+        }
+
+        return error.DidInventoryCapacityExceeded;
+    }
+};
+
 const uds_inventory_capacity = 64;
 
 const UdsInventoryError = error{
@@ -308,6 +385,14 @@ pub fn main(
 
     var pairs = PairInventory{};
     var uds_inventory = UdsInventory{};
+    var did_inventory = DidInventory{};
+
+    var read_did_requests: usize = 0;
+    var read_did_identifiers: usize = 0;
+    var malformed_read_did_requests: usize = 0;
+    var multi_did_requests: usize = 0;
+    var read_did_positive_responses: usize = 0;
+    var malformed_read_did_positive_responses: usize = 0;
 
     var router =
         isotp.SessionRouter(
@@ -518,6 +603,73 @@ pub fn main(
 
                     return;
                 };
+                switch (uds_message) {
+                    .service => |service| {
+                        if (service.service_id == 0x22) {
+                            read_did_requests += 1;
+
+                            if (service.data.len == 0 or
+                                service.data.len % 2 != 0)
+                            {
+                                malformed_read_did_requests += 1;
+                                continue;
+                            }
+
+                            const did_count =
+                                service.data.len / 2;
+
+                            if (did_count > 1) {
+                                multi_did_requests += 1;
+                            }
+
+                            var offset: usize = 0;
+
+                            while (offset < service.data.len) : (offset += 2) {
+                                const did =
+                                    (@as(u16, service.data[offset]) << 8) |
+                                    @as(u16, service.data[offset + 1]);
+
+                                did_inventory.observeRequest(
+                                    did,
+                                ) catch |err| {
+                                    std.debug.print(
+                                        "DID inventory error: {s}\n",
+                                        .{@errorName(err)},
+                                    );
+
+                                    return;
+                                };
+
+                                read_did_identifiers += 1;
+                            }
+                        }
+                        if (service.service_id == 0x62) {
+                            read_did_positive_responses += 1;
+
+                            if (service.data.len < 2) {
+                                malformed_read_did_positive_responses += 1;
+                                continue;
+                            }
+
+                            const did =
+                                (@as(u16, service.data[0]) << 8) |
+                                @as(u16, service.data[1]);
+
+                            did_inventory.observePositiveResponse(
+                                did,
+                            ) catch |err| {
+                                std.debug.print(
+                                    "DID response inventory error: {s}\n",
+                                    .{@errorName(err)},
+                                );
+
+                                return;
+                            };
+                        }
+                    },
+
+                    .negative_response => {},
+                }
             },
 
             .flow_control => |flow_control| {
@@ -531,6 +683,30 @@ pub fn main(
                     pair.unmatched_flow_controls += 1;
                 }
             },
+        }
+    }
+
+    var distinct_requested_dids: usize = 0;
+    var distinct_response_dids: usize = 0;
+    var did_count_mismatches: usize = 0;
+
+    for (did_inventory.entries) |entry| {
+        if (!entry.occupied) {
+            continue;
+        }
+
+        if (entry.request_count > 0) {
+            distinct_requested_dids += 1;
+        }
+
+        if (entry.positive_response_count > 0) {
+            distinct_response_dids += 1;
+        }
+
+        if (entry.request_count !=
+            entry.positive_response_count)
+        {
+            did_count_mismatches += 1;
         }
     }
 
@@ -553,15 +729,15 @@ pub fn main(
         \\UDS messages: {}
         \\UDS parse rejected: {}
         \\negative responses: {}
-        \\matched flow controls: {}
-        \\unmatched flow controls: {}
-        \\capacity exceeded: {}
-        \\transfer already active: {}
-        \\no active transfer: {}
-        \\unexpected sequence number: {}
-        \\unsupported frame type: {}
-        \\session capacity exceeded: {}
-        \\address pairs: {}
+        \\0x22 requests: {}
+        \\0x22 identifiers requested: {}
+        \\malformed 0x22 requests: {}
+        \\multi-DID 0x22 requests: {}
+        \\distinct requested DIDs: {}
+        \\distinct response DIDs: {}
+        \\DID request/response count mismatches: {}
+        \\0x62 positive responses: {}
+        \\malformed 0x62 positive responses: {}
         \\
     ,
         .{
@@ -583,6 +759,31 @@ pub fn main(
             uds_messages,
             uds_parse_rejected,
             negative_responses,
+            read_did_requests,
+            read_did_identifiers,
+            malformed_read_did_requests,
+            multi_did_requests,
+            distinct_requested_dids,
+            distinct_response_dids,
+            did_count_mismatches,
+            read_did_positive_responses,
+            malformed_read_did_positive_responses,
+        },
+    );
+
+    std.debug.print(
+        \\matched flow controls: {}
+        \\unmatched flow controls: {}
+        \\capacity exceeded: {}
+        \\transfer already active: {}
+        \\no active transfer: {}
+        \\unexpected sequence number: {}
+        \\unsupported frame type: {}
+        \\session capacity exceeded: {}
+        \\address pairs: {}
+        \\
+    ,
+        .{
             matched_flow_controls,
             unmatched_flow_controls,
             capacity_exceeded,
@@ -680,5 +881,24 @@ pub fn main(
                 );
             },
         }
+    }
+    std.debug.print(
+        "\nUDS 0x22 requested DID inventory:\n",
+        .{},
+    );
+
+    for (did_inventory.entries) |entry| {
+        if (!entry.occupied) {
+            continue;
+        }
+
+        std.debug.print(
+            "  DID 0x{X:0>4}: {} requests, {} positive responses\n",
+            .{
+                entry.did,
+                entry.request_count,
+                entry.positive_response_count,
+            },
+        );
     }
 }
