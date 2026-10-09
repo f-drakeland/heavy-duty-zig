@@ -1,4 +1,5 @@
 pub const can = @import("can.zig");
+pub const isotp = @import("isotp.zig");
 pub const candump = @import("candump.zig");
 pub const ddec_csv = @import("ddec_csv.zig");
 const candump_audit = @import("candump_audit.zig");
@@ -14,6 +15,7 @@ pub const capture_pipeline = @import("capture_pipeline.zig");
 
 test {
     _ = can;
+    _ = isotp;
     _ = candump;
     _ = ddec_csv;
     _ = candump_audit;
@@ -26,6 +28,157 @@ test {
     _ = capture_text;
     _ = capture_audit;
     _ = capture_pipeline;
+}
+
+test "authentic DDEC diagnostic traffic reaches ISO-TP parser" {
+    const std = @import("std");
+
+    const single_line =
+        "133.028691,572,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18da00f1,data:,02,10,03,00,00,00,00,00,";
+
+    const first_line =
+        "135.396711,552,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18daf100,data:,10,16,62,f1,95,00,02,56,";
+
+    const flow_control_line =
+        "135.397863,576,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18da00f1,data:,30,08,00,00,00,00,00,00,";
+
+    const consecutive_line =
+        "135.399007,560,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18daf100,data:,21,00,01,52,15,00,00,61,";
+
+    const single_record = switch (try ddec_csv.parseLine(single_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const single_can =
+        try single_record.frame();
+
+    const single =
+        try isotp.parse(single_can.data());
+
+    switch (single) {
+        .single_frame => |frame| {
+            try std.testing.expectEqual(
+                @as(u8, 2),
+                frame.declared_length,
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &[_]u8{ 0x10, 0x03 },
+                frame.payload,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const first_record = switch (try ddec_csv.parseLine(first_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const first_can =
+        try first_record.frame();
+
+    const first =
+        try isotp.parse(first_can.data());
+
+    switch (first) {
+        .first_frame => |frame| {
+            try std.testing.expectEqual(
+                @as(u16, 0x16),
+                frame.message_length,
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &[_]u8{
+                    0x62,
+                    0xf1,
+                    0x95,
+                    0x00,
+                    0x02,
+                    0x56,
+                },
+                frame.data,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const flow_control_record = switch (try ddec_csv.parseLine(flow_control_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const flow_control_can =
+        try flow_control_record.frame();
+
+    const flow_control =
+        try isotp.parse(
+            flow_control_can.data(),
+        );
+
+    switch (flow_control) {
+        .flow_control => |frame| {
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                frame.flow_status,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 8),
+                frame.block_size,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                frame.separation_time,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const consecutive_record = switch (try ddec_csv.parseLine(consecutive_line)) {
+        .can => |record| record,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const consecutive_can =
+        try consecutive_record.frame();
+
+    const consecutive =
+        try isotp.parse(
+            consecutive_can.data(),
+        );
+
+    switch (consecutive) {
+        .consecutive_frame => |frame| {
+            try std.testing.expectEqual(
+                @as(u8, 1),
+                frame.sequence_number,
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &[_]u8{
+                    0x00,
+                    0x01,
+                    0x52,
+                    0x15,
+                    0x00,
+                    0x00,
+                    0x61,
+                },
+                frame.data,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "logger text reaches typed J1587 observation" {
