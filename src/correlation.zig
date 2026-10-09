@@ -308,6 +308,148 @@ pub fn OwnedIdentityObservation(
         }
     };
 }
+
+pub const IdentityObserveResult = enum {
+    non_identity,
+    new_evidence,
+    existing_evidence,
+};
+
+pub const IdentityInventoryError =
+    IdentityStorageError ||
+    error{
+        IdentityEvidenceCapacityExceeded,
+    };
+
+/// Bounded capture-local inventory of distinct identity-bearing evidence.
+///
+/// Exact repeated evidence increments an occurrence count. Conflicting or
+/// otherwise distinct evidence is preserved separately. No observation is
+/// promoted to a permanent controller, component, vehicle, or physical ECU
+/// identity.
+pub fn IdentityEvidenceInventory(
+    comptime evidence_capacity: usize,
+    comptime text_capacity: usize,
+) type {
+    if (evidence_capacity == 0) {
+        @compileError(
+            "identity evidence capacity must be greater than zero",
+        );
+    }
+
+    const Owned =
+        OwnedIdentityObservation(text_capacity);
+
+    return struct {
+        const Self = @This();
+
+        pub const EvidenceView = struct {
+            observation: *const Owned,
+            occurrence_count: usize,
+        };
+
+        const Slot = struct {
+            occupied: bool = false,
+            observation: Owned = undefined,
+            occurrence_count: usize = 0,
+        };
+
+        slots: [evidence_capacity]Slot =
+            @splat(.{}),
+
+        evidence_count: usize = 0,
+
+        pub fn observe(
+            self: *Self,
+            observation: EndpointObservation,
+        ) IdentityInventoryError!IdentityObserveResult {
+            const owned =
+                (try Owned.fromEndpointObservation(
+                    observation,
+                )) orelse
+                return .non_identity;
+
+            if (self.findExact(&owned)) |slot| {
+                slot.occurrence_count += 1;
+
+                return .existing_evidence;
+            }
+
+            const slot =
+                self.findFreeSlot() orelse
+                return error.IdentityEvidenceCapacityExceeded;
+
+            slot.* = .{
+                .occupied = true,
+                .observation = owned,
+                .occurrence_count = 1,
+            };
+
+            self.evidence_count += 1;
+
+            return .new_evidence;
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.evidence_count;
+        }
+
+        pub fn evidenceAt(
+            self: *const Self,
+            index: usize,
+        ) ?EvidenceView {
+            var observed_index: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (observed_index == index) {
+                    return .{
+                        .observation = &slot.observation,
+                        .occurrence_count = slot.occurrence_count,
+                    };
+                }
+
+                observed_index += 1;
+            }
+
+            return null;
+        }
+
+        fn findExact(
+            self: *Self,
+            observation: *const Owned,
+        ) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.observation.eqlExact(
+                        observation,
+                    ))
+                {
+                    return slot;
+                }
+            }
+
+            return null;
+        }
+
+        fn findFreeSlot(
+            self: *Self,
+        ) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    return slot;
+                }
+            }
+
+            return null;
+        }
+    };
+}
 pub const EndpointSummary = struct {
     key: EndpointKey,
     observation_count: usize,
@@ -1148,5 +1290,212 @@ test "owned identity exact equality includes delivery evidence" {
 
     try std.testing.expect(
         !first.eqlExact(&second),
+    );
+}
+
+test "identity inventory counts repeated exact evidence" {
+    const observation = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    var inventory =
+        IdentityEvidenceInventory(4, 32){};
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.new_evidence,
+        try inventory.observe(observation),
+    );
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.existing_evidence,
+        try inventory.observe(observation),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
+    );
+
+    const evidence =
+        inventory.evidenceAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        evidence.occurrence_count,
+    );
+
+    try std.testing.expect(
+        inventory.evidenceAt(1) == null,
+    );
+}
+
+test "identity inventory preserves conflicting evidence from same endpoint" {
+    const first = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    const second = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x2003030000400064,
+            },
+        },
+    });
+
+    var inventory =
+        IdentityEvidenceInventory(4, 32){};
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.new_evidence,
+        try inventory.observe(first),
+    );
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.new_evidence,
+        try inventory.observe(second),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
+    );
+
+    const first_evidence =
+        inventory.evidenceAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    const second_evidence =
+        inventory.evidenceAt(1) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        !first_evidence.observation.eqlExact(
+            second_evidence.observation,
+        ),
+    );
+}
+
+test "identity inventory ignores non-identity observations" {
+    const observation = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x00,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    var inventory =
+        IdentityEvidenceInventory(4, 32){};
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.non_identity,
+        try inventory.observe(observation),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        inventory.count(),
+    );
+}
+
+test "full identity inventory still counts repeated evidence" {
+    const first = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    const second = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x81,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x2003030000400064,
+            },
+        },
+    });
+
+    var inventory =
+        IdentityEvidenceInventory(1, 32){};
+
+    _ = try inventory.observe(first);
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.existing_evidence,
+        try inventory.observe(first),
+    );
+
+    try std.testing.expectError(
+        error.IdentityEvidenceCapacityExceeded,
+        inventory.observe(second),
+    );
+
+    const evidence =
+        inventory.evidenceAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        evidence.occurrence_count,
+    );
+}
+
+test "identity inventory keeps same evidence separate across endpoints" {
+    const first = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    const second = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x81,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    var inventory =
+        IdentityEvidenceInventory(4, 32){};
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.new_evidence,
+        try inventory.observe(first),
+    );
+
+    try std.testing.expectEqual(
+        IdentityObserveResult.new_evidence,
+        try inventory.observe(second),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
     );
 }
