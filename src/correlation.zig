@@ -637,6 +637,86 @@ pub fn EndpointInventory(
     };
 }
 
+/// Read-only capture-local view across endpoint and identity evidence.
+///
+/// This composes existing inventories for reporting and inspection without
+/// promoting protocol endpoints to permanent controller or physical ECU
+/// identities. Callers are responsible for supplying inventories populated
+/// from the same capture observation stream.
+pub fn CaptureCorrelationView(
+    comptime endpoint_capacity: usize,
+    comptime evidence_capacity: usize,
+    comptime text_capacity: usize,
+) type {
+    const Endpoints =
+        EndpointInventory(endpoint_capacity);
+
+    const Identities =
+        IdentityEvidenceInventory(
+            evidence_capacity,
+            text_capacity,
+        );
+
+    return struct {
+        const Self = @This();
+
+        pub const EndpointView = struct {
+            key: EndpointKey,
+            observation_count: usize,
+            identity_evidence_count: usize,
+        };
+
+        endpoints: *const Endpoints,
+        identities: *const Identities,
+
+        pub fn init(
+            endpoints: *const Endpoints,
+            identities: *const Identities,
+        ) Self {
+            return .{
+                .endpoints = endpoints,
+                .identities = identities,
+            };
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.endpoints.count();
+        }
+
+        pub fn endpointAt(
+            self: *const Self,
+            index: usize,
+        ) ?EndpointView {
+            const endpoint =
+                self.endpoints.endpointAt(index) orelse
+                return null;
+
+            return .{
+                .key = endpoint.key,
+                .observation_count = endpoint.observation_count,
+                .identity_evidence_count = self.identities
+                    .evidenceCountForEndpoint(
+                    endpoint.key,
+                ),
+            };
+        }
+
+        pub fn identityEvidenceAt(
+            self: *const Self,
+            key: EndpointKey,
+            index: usize,
+        ) ?Identities.EvidenceView {
+            return self.identities
+                .evidenceForEndpointAt(
+                key,
+                index,
+            );
+        }
+    };
+}
+
 pub fn fromJ1587(
     observation: j1587.Observation,
 ) EndpointObservation {
@@ -1651,5 +1731,133 @@ test "identity inventory queries distinct evidence by endpoint" {
             },
             2,
         ) == null,
+    );
+}
+
+test "capture correlation view reports endpoint identity evidence" {
+    const claim_a = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    const claim_b = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x2003030000400064,
+            },
+        },
+    });
+
+    const engine_speed = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    const other_endpoint = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x81,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    var endpoints =
+        EndpointInventory(4){};
+
+    var identities =
+        IdentityEvidenceInventory(4, 32){};
+
+    const observations = [_]EndpointObservation{
+        claim_a,
+        claim_a,
+        claim_b,
+        engine_speed,
+        other_endpoint,
+    };
+
+    for (observations) |observation| {
+        _ = try endpoints.observe(
+            observation,
+        );
+
+        _ = try identities.observe(
+            observation,
+        );
+    }
+
+    const View =
+        CaptureCorrelationView(
+            4,
+            4,
+            32,
+        );
+
+    const view =
+        View.init(
+            &endpoints,
+            &identities,
+        );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        view.count(),
+    );
+
+    const first_endpoint =
+        view.endpointAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        first_endpoint.key.eql(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        first_endpoint.observation_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        first_endpoint.identity_evidence_count,
+    );
+
+    const first_identity =
+        view.identityEvidenceAt(
+            first_endpoint.key,
+            0,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        first_identity.occurrence_count,
+    );
+
+    const second_endpoint =
+        view.endpointAt(1) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        second_endpoint.observation_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        second_endpoint.identity_evidence_count,
     );
 }
