@@ -1,5 +1,6 @@
 pub const can = @import("can.zig");
 pub const candump = @import("candump.zig");
+pub const ddec_csv = @import("ddec_csv.zig");
 const candump_audit = @import("candump_audit.zig");
 const j1939_capture_audit = @import("j1939_capture_audit.zig");
 pub const j1939 = @import("j1939.zig");
@@ -14,6 +15,7 @@ pub const capture_pipeline = @import("capture_pipeline.zig");
 test {
     _ = can;
     _ = candump;
+    _ = ddec_csv;
     _ = candump_audit;
     _ = j1939_capture_audit;
     _ = j1939;
