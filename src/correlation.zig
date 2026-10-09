@@ -496,6 +496,7 @@ pub fn IdentityEvidenceInventory(
 }
 pub const EndpointSummary = struct {
     key: EndpointKey,
+    presence_count: usize,
     observation_count: usize,
 };
 
@@ -510,7 +511,11 @@ pub const InventoryError = error{
 
 /// Capture-local inventory of observed protocol endpoints.
 ///
-/// This inventory retains endpoint keys and observation counts only.
+/// This inventory retains capture-local endpoint presence and typed
+/// observation counts independently. Each presence count represents a raw
+/// sighting of that protocol endpoint supplied by the caller; it does not
+/// represent a distinct device, session, or logical message.
+///
 /// It does not retain borrowed protocol evidence or imply permanent
 /// controller or physical ECU identity.
 pub fn EndpointInventory(
@@ -530,6 +535,7 @@ pub fn EndpointInventory(
             key: EndpointKey = .{
                 .j1587_mid = 0,
             },
+            presence_count: usize = 0,
             observation_count: usize = 0,
         };
 
@@ -537,6 +543,32 @@ pub fn EndpointInventory(
             @splat(.{}),
 
         endpoint_count: usize = 0,
+
+        pub fn observePresence(
+            self: *Self,
+            key: EndpointKey,
+        ) InventoryError!InventoryObserveResult {
+            if (self.findSlot(key)) |slot| {
+                slot.presence_count += 1;
+
+                return .existing_endpoint;
+            }
+
+            const slot =
+                self.findFreeSlot() orelse
+                return error.EndpointCapacityExceeded;
+
+            slot.* = .{
+                .occupied = true,
+                .key = key,
+                .presence_count = 1,
+                .observation_count = 0,
+            };
+
+            self.endpoint_count += 1;
+
+            return .new_endpoint;
+        }
 
         pub fn observe(
             self: *Self,
@@ -555,6 +587,7 @@ pub fn EndpointInventory(
             slot.* = .{
                 .occupied = true,
                 .key = observation.endpoint,
+                .presence_count = 0,
                 .observation_count = 1,
             };
 
@@ -583,11 +616,27 @@ pub fn EndpointInventory(
                 if (observed_index == index) {
                     return .{
                         .key = slot.key,
+                        .presence_count = slot.presence_count,
                         .observation_count = slot.observation_count,
                     };
                 }
 
                 observed_index += 1;
+            }
+
+            return null;
+        }
+
+        pub fn presenceCount(
+            self: *const Self,
+            key: EndpointKey,
+        ) ?usize {
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.key.eql(key))
+                {
+                    return slot.presence_count;
+                }
             }
 
             return null;
@@ -662,6 +711,7 @@ pub fn CaptureCorrelationView(
 
         pub const EndpointView = struct {
             key: EndpointKey,
+            presence_count: usize,
             observation_count: usize,
             identity_evidence_count: usize,
         };
@@ -695,6 +745,7 @@ pub fn CaptureCorrelationView(
 
             return .{
                 .key = endpoint.key,
+                .presence_count = endpoint.presence_count,
                 .observation_count = endpoint.observation_count,
                 .identity_evidence_count = self.identities
                     .evidenceCountForEndpoint(
@@ -1044,6 +1095,63 @@ test "inventory groups observations from same J1939 endpoint" {
     );
 }
 
+test "inventory tracks raw presence separately from typed observations" {
+    const key: EndpointKey = .{
+        .j1939_source_address = 0x02,
+    };
+
+    const observation = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x02,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    var inventory = EndpointInventory(4){};
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.new_endpoint,
+        try inventory.observePresence(key),
+    );
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.existing_endpoint,
+        try inventory.observePresence(key),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        inventory.presenceCount(key),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        inventory.observationCount(key),
+    );
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.existing_endpoint,
+        try inventory.observe(observation),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        inventory.presenceCount(key),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        inventory.observationCount(key),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
+    );
+}
+
 test "inventory keeps same numeric address separate across protocols" {
     const j1587_observation = fromJ1587(.{
         .engine_speed = .{
@@ -1123,6 +1231,34 @@ test "inventory keeps same numeric address separate across protocols" {
 
     try std.testing.expect(
         inventory.endpointAt(2) == null,
+    );
+}
+
+test "full inventory still counts presence for existing endpoint" {
+    const key: EndpointKey = .{
+        .j1939_source_address = 0x00,
+    };
+
+    var inventory = EndpointInventory(1){};
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.new_endpoint,
+        try inventory.observePresence(key),
+    );
+
+    try std.testing.expectEqual(
+        InventoryObserveResult.existing_endpoint,
+        try inventory.observePresence(key),
+    );
+
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        inventory.presenceCount(key),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
     );
 }
 
