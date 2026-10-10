@@ -872,31 +872,61 @@ Future occurrence-level relationships such as temporal ordering, request/respons
 sequence, and state-transition relationships should reference occurrences rather
 than durable evidence values.
 
-This decision establishes the ownership boundary for provenance. It does not yet
-define the concrete occurrence identifier types, lineage storage representation, or
-transport-context relationship model.
+This decision establishes the ownership boundary for provenance.
+
+### Implementation checkpoint
+
+The first concrete implementation of this decision is now established.
+
+Capture orchestration uses a capture-local `FrameOccurrenceId` rather than
+embedding capture identity in protocol types. Protocol reassembly reports
+message-relative payload contributions, and capture-level code can project those
+contributions into evidence-relative byte ranges.
+
+`EvidencePayloadContribution` records the frame occurrence and evidence-relative
+range supplied by that frame. Bounded correlation-evidence occurrence storage
+can then retain multiple occurrences of the same durable evidence value without
+duplicating the durable value itself.
+
+Authentic-capture validation has demonstrated this model on both sides of one
+cross-protocol relationship:
+
+- five J1939 TP.DT occurrences contribute the complete 33-byte FEEB evidence;
+- six ISO-TP occurrences contribute the 33-byte F157 evidence after projection
+  past the UDS service and DID bytes;
+- RTS, CTS, and ISO-TP Flow Control do not contribute payload bytes; RTS
+  establishes transfer start, while CTS and ISO-TP Flow Control provide
+  transport context.
+
+The focused developer-inspector implementation is not yet a generalized
+capture-ingestion pipeline, and the J1939 proof collector is narrower than the
+multi-session protocol assembler.
 
 ---
 
 # Open architecture questions
 
-The provenance ownership boundary is now established. The remaining design questions
-are narrower:
+The provenance ownership boundary, capture-local frame-occurrence identity,
+payload-contribution representation, and payload-versus-transport-context
+distinction are now established.
 
-- what is the minimum capture-occurrence identity needed across file-backed and
-  future live capture sources;
-- how should a logical-message lineage represent the exact contributing frame
-  occurrences and the payload ranges they supplied;
-- which transport-control occurrences are payload contributors and which should be
-  preserved as related transport context instead;
+The remaining questions are narrower:
+
+- how should capture namespaces be represented when evidence may come from
+  multiple files, adapters, or future live capture sources;
 - how should source-specific timing evidence be preserved without assuming that
   timestamps from different capture sources or clock domains are directly
   comparable;
-- where should bounded lineage storage live so callers can choose retention policy
-  without changing protocol semantics.
+- how should transport-context occurrences be retained and related to evidence
+  occurrences when they do not contribute payload bytes;
+- how should the proven occurrence model be generalized from focused
+  developer-inspector paths into reusable capture orchestration;
+- which occurrence-level relationships should be introduced first: temporal,
+  request/response, sequence, or state-transition relationships.
 
-These questions should be resolved through small authenticated provenance proofs
-before HDZ introduces durable temporal, request/response, or sequence relationships.
+These questions should continue to be resolved through small authentic-capture
+proofs before HDZ promotes richer occurrence relationships into durable
+diagnostic conclusions.
 
 ---
 
