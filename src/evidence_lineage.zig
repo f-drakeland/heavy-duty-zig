@@ -283,3 +283,236 @@ test "evidence occurrence requires payload provenance" {
         ),
     );
 }
+
+test "cross-protocol relationship preserves independent occurrence lineage" {
+    const Evidence =
+        correlation.OwnedCorrelationEvidence(64);
+
+    const payload =
+        "DTDSC*471N10*S0066951*611035\x00\x00\x00\x00*";
+
+    var evidence_inventory =
+        correlation.CorrelationEvidenceInventory(
+            4,
+            64,
+        ){};
+
+    const j1939_evidence =
+        (try Evidence.fromJ1939ComponentIdentification(.{
+            .source_address = 0x00,
+            .delivery = .rts_cts,
+            .make = "DTDSC",
+            .model = "471N10",
+            .serial_number = "S0066951",
+            .unit_number = payload[22..32],
+            .raw_payload = payload[0..],
+        })) orelse
+        return error.TestUnexpectedResult;
+
+    const j1939_observed =
+        try evidence_inventory.observe(
+            j1939_evidence,
+        );
+
+    const uds_evidence =
+        try Evidence.fromUdsDataIdentifier(.{
+            .source_address = 0x00,
+            .destination_address = 0xf1,
+            .delivery = .multi_frame,
+            .data_identifier = 0xf157,
+            .data_after_identifier = payload[0..],
+        });
+
+    const uds_observed =
+        try evidence_inventory.observe(
+            uds_evidence,
+        );
+
+    try std.testing.expect(
+        !j1939_observed.id.eql(
+            uds_observed.id,
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        evidence_inventory.count(),
+    );
+
+    const relationship =
+        evidence_inventory.exactPayloadRelationship(
+            j1939_observed.id,
+            uds_observed.id,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        correlation.EvidenceRelationshipReason
+            .exact_payload_equality,
+        relationship.reason,
+    );
+
+    try std.testing.expect(
+        relationship.left.eql(
+            j1939_observed.id,
+        ),
+    );
+
+    try std.testing.expect(
+        relationship.right.eql(
+            uds_observed.id,
+        ),
+    );
+
+    try std.testing.expectEqual(
+        payload.len,
+        relationship.byte_length,
+    );
+
+    var relationship_inventory =
+        correlation.EvidenceRelationshipInventory(
+            2,
+        ){};
+
+    const recorded_relationship =
+        try relationship_inventory.record(
+            relationship,
+        );
+
+    try std.testing.expectEqual(
+        correlation.EvidenceRelationshipRecordStatus
+            .new_relationship,
+        recorded_relationship.status,
+    );
+
+    const j1939_contributions =
+        [_]capture_lineage.EvidencePayloadContribution{
+            .{
+                .frame_occurrence = .{ .index = 10 },
+                .evidence_offset = 0,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 11 },
+                .evidence_offset = 7,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 12 },
+                .evidence_offset = 14,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 13 },
+                .evidence_offset = 21,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 14 },
+                .evidence_offset = 28,
+                .byte_length = 5,
+            },
+        };
+
+    const uds_contributions =
+        [_]capture_lineage.EvidencePayloadContribution{
+            .{
+                .frame_occurrence = .{ .index = 20 },
+                .evidence_offset = 0,
+                .byte_length = 3,
+            },
+            .{
+                .frame_occurrence = .{ .index = 21 },
+                .evidence_offset = 3,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 22 },
+                .evidence_offset = 10,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 23 },
+                .evidence_offset = 17,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 24 },
+                .evidence_offset = 24,
+                .byte_length = 7,
+            },
+            .{
+                .frame_occurrence = .{ .index = 25 },
+                .evidence_offset = 31,
+                .byte_length = 2,
+            },
+        };
+
+    var occurrence_inventory =
+        CorrelationEvidenceOccurrenceInventory(
+            4,
+            16,
+        ){};
+
+    const j1939_occurrence_id =
+        try occurrence_inventory.record(
+            j1939_observed.id,
+            &j1939_contributions,
+        );
+
+    const uds_occurrence_id =
+        try occurrence_inventory.record(
+            uds_observed.id,
+            &uds_contributions,
+        );
+
+    const j1939_occurrence =
+        occurrence_inventory.occurrence(
+            j1939_occurrence_id,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    const uds_occurrence =
+        occurrence_inventory.occurrence(
+            uds_occurrence_id,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        j1939_occurrence.value_id.eql(
+            relationship.left,
+        ),
+    );
+
+    try std.testing.expect(
+        uds_occurrence.value_id.eql(
+            relationship.right,
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 5),
+        j1939_occurrence.contributions.len,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        uds_occurrence.contributions.len,
+    );
+
+    try std.testing.expectEqual(
+        payload.len,
+        j1939_occurrence.contributions[4]
+            .evidence_offset +
+            j1939_occurrence.contributions[4]
+                .byte_length,
+    );
+
+    try std.testing.expectEqual(
+        payload.len,
+        uds_occurrence.contributions[5]
+            .evidence_offset +
+            uds_occurrence.contributions[5]
+                .byte_length,
+    );
+}
