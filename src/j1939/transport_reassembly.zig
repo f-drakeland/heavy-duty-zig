@@ -21,6 +21,16 @@ pub const CompletedMessage = struct {
     data: []const u8,
 };
 
+pub const PayloadContribution = struct {
+    offset: usize,
+    byte_length: usize,
+};
+
+pub const PushDataResult = struct {
+    contribution: PayloadContribution,
+    completed: ?CompletedMessage,
+};
+
 pub fn Reassembler(comptime capacity: usize) type {
     return struct {
         const Self = @This();
@@ -106,6 +116,22 @@ pub fn Reassembler(comptime capacity: usize) type {
             sequence_number: u8,
             data: []const u8,
         ) ReassemblyError!?CompletedMessage {
+            const result =
+                try self.pushDataWithContribution(
+                    source_address,
+                    sequence_number,
+                    data,
+                );
+
+            return result.completed;
+        }
+
+        pub fn pushDataWithContribution(
+            self: *Self,
+            source_address: u8,
+            sequence_number: u8,
+            data: []const u8,
+        ) ReassemblyError!PushDataResult {
             if (!self.active) {
                 return error.NoActiveTransfer;
             }
@@ -128,6 +154,11 @@ pub fn Reassembler(comptime capacity: usize) type {
             const copy_length =
                 @min(remaining, data.len);
 
+            const contribution = PayloadContribution{
+                .offset = self.bytes_written,
+                .byte_length = copy_length,
+            };
+
             std.mem.copyForwards(
                 u8,
                 self.buffer[self.bytes_written .. self.bytes_written + copy_length],
@@ -140,17 +171,113 @@ pub fn Reassembler(comptime capacity: usize) type {
                 self.active = false;
 
                 return .{
-                    .source_address = self.source_address,
-                    .target_pgn = self.target_pgn,
-                    .data = self.buffer[0..self.total_message_size],
+                    .contribution = contribution,
+                    .completed = .{
+                        .source_address = self.source_address,
+                        .target_pgn = self.target_pgn,
+                        .data = self.buffer[0..self.total_message_size],
+                    },
                 };
             }
 
             self.next_sequence_number += 1;
 
-            return null;
+            return .{
+                .contribution = contribution,
+                .completed = null,
+            };
         }
     };
+}
+
+test "reports exact logical payload contribution for transport packets" {
+    var reassembler = Reassembler(32){};
+
+    try reassembler.startBam(
+        0x80,
+        10,
+        2,
+        0x00feca,
+    );
+
+    const packet_1 = [_]u8{
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+    };
+
+    const packet_2 = [_]u8{
+        0x08,
+        0x09,
+        0x0a,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const first =
+        try reassembler.pushDataWithContribution(
+            0x80,
+            1,
+            &packet_1,
+        );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        first.contribution.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        first.contribution.byte_length,
+    );
+
+    try std.testing.expect(
+        first.completed == null,
+    );
+
+    const second =
+        try reassembler.pushDataWithContribution(
+            0x80,
+            2,
+            &packet_2,
+        );
+
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        second.contribution.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        second.contribution.byte_length,
+    );
+
+    const completed =
+        second.completed orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{
+            0x01,
+            0x02,
+            0x03,
+            0x04,
+            0x05,
+            0x06,
+            0x07,
+            0x08,
+            0x09,
+            0x0a,
+        },
+        completed.data,
+    );
 }
 
 test "reassembles BAM payload and removes final packet padding" {
