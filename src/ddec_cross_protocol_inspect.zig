@@ -4,6 +4,7 @@ const Io = std.Io;
 const correlation = @import("correlation.zig");
 const capture_lineage = @import("capture_lineage.zig");
 const j1939_capture_lineage = @import("j1939_capture_lineage.zig");
+const isotp_capture_lineage = @import("isotp_capture_lineage.zig");
 const evidence_lineage = @import("evidence_lineage.zig");
 const ddec_csv = @import("ddec_csv.zig");
 const isotp = @import("isotp.zig");
@@ -11,8 +12,7 @@ const j1939 = @import("j1939.zig");
 
 // Operational bounds for this whole-file developer CLI.
 // These are not protocol limits.
-const max_capture_bytes =
-    64 * 1024 * 1024;
+const max_capture_bytes = 64 * 1024 * 1024;
 
 const component_sample_capacity = 16;
 // Developer-CLI bound for contributors retained with one component sample.
@@ -24,6 +24,10 @@ const lineage_occurrence_capacity = 4;
 const lineage_contribution_capacity = 16;
 const session_capacity = 16;
 const payload_capacity = 4095;
+// One payload contribution must supply at least one logical-message byte.
+// Using the payload bound here therefore covers every contributor that can
+// participate in one accepted ISO-TP message without assuming full CAN DLC.
+const isotp_transport_lineage_capacity = payload_capacity;
 
 const ComponentSampleError = error{
     MissingRawPayload,
@@ -441,13 +445,13 @@ fn inspectUdsMatches(
 
     var next_frame_occurrence_index: usize = 0;
 
-    var f157_response_active = false;
-    var f157_evidence_span: ?correlation.PayloadRange = null;
+    const LineageTracker =
+        isotp_capture_lineage.IsotpTransportLineageTracker(
+            session_capacity,
+            isotp_transport_lineage_capacity,
+        );
 
-    var f157_contributions: [lineage_contribution_capacity]capture_lineage.EvidencePayloadContribution =
-        undefined;
-
-    var f157_contribution_count: usize = 0;
+    var lineage_tracker: LineageTracker = .{};
 
     var lines =
         std.mem.splitScalar(
@@ -518,28 +522,6 @@ fn inspectUdsMatches(
             continue;
         }
 
-        var f157_start_span: ?correlation.PayloadRange = null;
-
-        switch (frame) {
-            .first_frame => |first| {
-                if (source_address == 0x00 and
-                    destination_address == 0xf1 and
-                    first.message_length >= 3 and
-                    first.data.len >= 3 and
-                    first.data[0] == 0x62 and
-                    first.data[1] == 0xf1 and
-                    first.data[2] == 0x57)
-                {
-                    f157_start_span = .{
-                        .offset = 3,
-                        .byte_length = @as(usize, first.message_length) - 3,
-                    };
-                }
-            },
-
-            else => {},
-        }
-
         const push_result =
             router.pushWithDerivation(
                 source_address,
@@ -551,45 +533,43 @@ fn inspectUdsMatches(
         const event =
             push_result.event;
 
+        var completed_transport_lineage: ?LineageTracker.CompletedLineage =
+            null;
+
         switch (push_result.derivation) {
             .transport_started => |derivation| {
-                if (f157_start_span) |span| {
-                    f157_response_active = true;
-                    f157_evidence_span = span;
-                    f157_contribution_count = 0;
+                try lineage_tracker.start(
+                    frame_occurrence,
+                    derivation,
+                );
 
-                    try appendProjectedEvidenceContribution(
-                        &f157_contributions,
-                        &f157_contribution_count,
-                        frame_occurrence,
-                        .{
-                            .offset = derivation.contribution.offset,
-                            .byte_length = derivation.contribution.byte_length,
-                        },
-                        span,
-                    );
+                switch (event) {
+                    .completed => {
+                        completed_transport_lineage =
+                            try lineage_tracker.finish(
+                                derivation.transfer,
+                            );
+                    },
+
+                    else => {},
                 }
             },
 
             .transport_payload => |derivation| {
-                if (f157_response_active and
-                    derivation.transfer.source_address == 0x00 and
-                    derivation.transfer.destination_address == 0xf1)
-                {
-                    const span =
-                        f157_evidence_span orelse
-                        return error.F157EvidenceSpanMissing;
+                try lineage_tracker.recordPayload(
+                    frame_occurrence,
+                    derivation,
+                );
 
-                    try appendProjectedEvidenceContribution(
-                        &f157_contributions,
-                        &f157_contribution_count,
-                        frame_occurrence,
-                        .{
-                            .offset = derivation.contribution.offset,
-                            .byte_length = derivation.contribution.byte_length,
-                        },
-                        span,
-                    );
+                switch (event) {
+                    .completed => {
+                        completed_transport_lineage =
+                            try lineage_tracker.finish(
+                                derivation.transfer,
+                            );
+                    },
+
+                    else => {},
                 }
             },
 
@@ -605,19 +585,6 @@ fn inspectUdsMatches(
             .flow_control => {},
 
             .completed => |message| {
-                const completes_traced_f157 =
-                    f157_response_active and
-                    message.source_address == 0x00 and
-                    message.destination_address == 0xf1 and
-                    message.delivery == .multi_frame;
-
-                defer {
-                    if (completes_traced_f157) {
-                        f157_response_active = false;
-                        f157_evidence_span = null;
-                        f157_contribution_count = 0;
-                    }
-                }
                 const maybe_evidence =
                     correlation
                         .fromUdsReadDataByIdentifierResponse(
@@ -633,6 +600,41 @@ fn inspectUdsMatches(
 
                 uds_did_responses += 1;
                 var f157_occurrence_recorded = false;
+
+                var f157_contributions: [lineage_contribution_capacity]capture_lineage.EvidencePayloadContribution =
+                    undefined;
+
+                var f157_contribution_count: usize = 0;
+
+                const traces_f157 =
+                    message.source_address == 0x00 and
+                    message.destination_address == 0xf1 and
+                    message.delivery == .multi_frame and
+                    uds_evidence.data_identifier == 0xf157;
+
+                if (traces_f157) {
+                    const lineage =
+                        completed_transport_lineage orelse
+                        return error.F157TransportLineageMissing;
+
+                    const evidence_span: correlation.PayloadRange = .{
+                        .offset = 3,
+                        .byte_length = uds_evidence.data_after_identifier.len,
+                    };
+
+                    for (lineage.slice()) |contribution| {
+                        try appendProjectedEvidenceContribution(
+                            &f157_contributions,
+                            &f157_contribution_count,
+                            contribution.frame_occurrence,
+                            .{
+                                .offset = contribution.message_offset,
+                                .byte_length = contribution.byte_length,
+                            },
+                            evidence_span,
+                        );
+                    }
+                }
 
                 for (
                     samples[0..sample_count],
@@ -723,20 +725,9 @@ fn inspectUdsMatches(
                             uds_owned,
                         );
 
-                    if (completes_traced_f157 and
-                        uds_evidence.data_identifier == 0xf157 and
+                    if (traces_f157 and
                         !f157_occurrence_recorded)
                     {
-                        const span =
-                            f157_evidence_span orelse
-                            return error.F157EvidenceSpanMissing;
-
-                        if (span.byte_length !=
-                            uds_evidence.data_after_identifier.len)
-                        {
-                            return error.F157EvidenceSpanMismatch;
-                        }
-
                         const occurrence_id =
                             try evidence_occurrences.record(
                                 uds_result.id,

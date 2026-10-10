@@ -12,6 +12,7 @@ pub const j1587 = @import("j1587.zig");
 pub const frame_recovery = @import("frame_recovery.zig");
 pub const capture_lineage = @import("capture_lineage.zig");
 pub const j1939_capture_lineage = @import("j1939_capture_lineage.zig");
+pub const isotp_capture_lineage = @import("isotp_capture_lineage.zig");
 pub const evidence_lineage = @import("evidence_lineage.zig");
 pub const capture_text = @import("capture_text.zig");
 pub const capture_audit = @import("capture_audit.zig");
@@ -32,6 +33,7 @@ test {
     _ = frame_recovery;
     _ = capture_lineage;
     _ = j1939_capture_lineage;
+    _ = isotp_capture_lineage;
     _ = evidence_lineage;
     _ = capture_text;
     _ = capture_audit;
