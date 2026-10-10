@@ -333,6 +333,205 @@ pub const UdsDataIdentifierEvidence = struct {
     data_after_identifier: []const u8,
 };
 
+pub const PayloadRange = struct {
+    offset: usize,
+    byte_length: usize,
+};
+
+/// Projects a logical-message payload contribution into the byte range of
+/// evidence derived from a subrange of that message.
+///
+/// The returned offset is relative to the beginning of `evidence_span`.
+/// `null` means the message contribution supplied no bytes to that evidence.
+pub fn projectPayloadContribution(
+    message_contribution: PayloadRange,
+    evidence_span: PayloadRange,
+) ?PayloadRange {
+    if (message_contribution.byte_length == 0 or
+        evidence_span.byte_length == 0)
+    {
+        return null;
+    }
+
+    if (message_contribution.offset <=
+        evidence_span.offset)
+    {
+        const distance =
+            evidence_span.offset -
+            message_contribution.offset;
+
+        if (distance >=
+            message_contribution.byte_length)
+        {
+            return null;
+        }
+
+        return .{
+            .offset = 0,
+            .byte_length = @min(
+                message_contribution.byte_length -
+                    distance,
+                evidence_span.byte_length,
+            ),
+        };
+    }
+
+    const evidence_offset =
+        message_contribution.offset -
+        evidence_span.offset;
+
+    if (evidence_offset >=
+        evidence_span.byte_length)
+    {
+        return null;
+    }
+
+    return .{
+        .offset = evidence_offset,
+        .byte_length = @min(
+            message_contribution.byte_length,
+            evidence_span.byte_length -
+                evidence_offset,
+        ),
+    };
+}
+
+test "projects whole-message contribution into evidence range" {
+    const projected =
+        projectPayloadContribution(
+            .{
+                .offset = 0,
+                .byte_length = 7,
+            },
+            .{
+                .offset = 0,
+                .byte_length = 33,
+            },
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        projected.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        projected.byte_length,
+    );
+}
+
+test "projects ISO-TP contribution into UDS evidence subrange" {
+    const first =
+        projectPayloadContribution(
+            .{
+                .offset = 0,
+                .byte_length = 6,
+            },
+            .{
+                .offset = 3,
+                .byte_length = 33,
+            },
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        first.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        first.byte_length,
+    );
+
+    const middle =
+        projectPayloadContribution(
+            .{
+                .offset = 6,
+                .byte_length = 7,
+            },
+            .{
+                .offset = 3,
+                .byte_length = 33,
+            },
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        middle.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        middle.byte_length,
+    );
+
+    const final =
+        projectPayloadContribution(
+            .{
+                .offset = 34,
+                .byte_length = 2,
+            },
+            .{
+                .offset = 3,
+                .byte_length = 33,
+            },
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 31),
+        final.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        final.byte_length,
+    );
+}
+
+test "projection clips contribution at end of evidence range" {
+    const projected =
+        projectPayloadContribution(
+            .{
+                .offset = 31,
+                .byte_length = 7,
+            },
+            .{
+                .offset = 3,
+                .byte_length = 33,
+            },
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 28),
+        projected.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 5),
+        projected.byte_length,
+    );
+}
+
+test "projection excludes message bytes outside evidence range" {
+    try std.testing.expect(
+        projectPayloadContribution(
+            .{
+                .offset = 0,
+                .byte_length = 3,
+            },
+            .{
+                .offset = 3,
+                .byte_length = 33,
+            },
+        ) == null,
+    );
+}
+
 pub const CorrelationStorageError = error{
     CorrelationPayloadCapacityExceeded,
 };
