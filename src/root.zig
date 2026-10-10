@@ -10,6 +10,7 @@ pub const correlation = @import("correlation.zig");
 pub const j1708 = @import("j1708.zig");
 pub const j1587 = @import("j1587.zig");
 pub const frame_recovery = @import("frame_recovery.zig");
+pub const capture_lineage = @import("capture_lineage.zig");
 pub const capture_text = @import("capture_text.zig");
 pub const capture_audit = @import("capture_audit.zig");
 pub const capture_pipeline = @import("capture_pipeline.zig");
@@ -27,6 +28,7 @@ test {
     _ = j1708;
     _ = j1587;
     _ = frame_recovery;
+    _ = capture_lineage;
     _ = capture_text;
     _ = capture_audit;
     _ = capture_pipeline;
