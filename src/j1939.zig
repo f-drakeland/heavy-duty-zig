@@ -103,6 +103,28 @@ pub const MessageEvent = union(enum) {
     unsupported_pgn: UnsupportedMessage,
 };
 
+pub const PayloadContribution =
+    transport.reassembly.PayloadContribution;
+
+pub const TransportTransfer = struct {
+    source_address: u8,
+    destination_address: u8,
+    target_pgn: u32,
+    delivery: MessageDelivery,
+};
+
+pub const TransportPayloadDerivation = struct {
+    transfer: TransportTransfer,
+    contribution: PayloadContribution,
+};
+
+pub const MessageAssemblyDerivation = union(enum) {
+    none,
+    direct_message: PayloadContribution,
+    transport_started: TransportTransfer,
+    transport_payload: TransportPayloadDerivation,
+};
+
 pub const BamStarted = struct {
     source_address: u8,
     target_pgn: u32,
@@ -131,6 +153,11 @@ pub const MessageAssemblyEvent = union(enum) {
     message: MessageView,
     bam_started: BamStarted,
     unsupported_transport_control: UnsupportedTransportControl,
+};
+
+pub const MessageAssemblyResult = struct {
+    event: ?MessageAssemblyEvent,
+    derivation: MessageAssemblyDerivation,
 };
 
 pub const MessageAssemblyError =
@@ -450,6 +477,134 @@ pub fn MessageAssembler(
             return null;
         }
 
+        fn pushTransportDataTransfer(
+            self: *Self,
+            frame: FrameView,
+        ) MessageAssemblyError!MessageAssemblyResult {
+            const identifier = frame.identifier();
+
+            const packet =
+                try transport.parseDataTransferData(
+                    frame.data(),
+                );
+
+            const destination_address =
+                identifier.destination_address orelse
+                return error.NoActiveTransfer;
+
+            const session =
+                self.findSession(
+                    identifier.source_address,
+                    destination_address,
+                ) orelse
+                return error.NoActiveTransfer;
+
+            const transfer = TransportTransfer{
+                .source_address = session.source_address,
+                .destination_address = session.destination_address,
+                .target_pgn = session.target_pgn,
+                .delivery = session.delivery,
+            };
+
+            const push_result =
+                try session.reassembler
+                    .pushDataWithContribution(
+                    identifier.source_address,
+                    packet.sequence_number,
+                    packet.data,
+                );
+
+            var event: ?MessageAssemblyEvent = null;
+
+            if (push_result.completed) |message| {
+                const delivery = session.delivery;
+
+                session.occupied = false;
+
+                const logical_message = switch (delivery) {
+                    .bam => MessageView.fromBam(message),
+
+                    .rts_cts => MessageView.fromRtsCts(
+                        message,
+                        destination_address,
+                    ),
+
+                    .single_frame => unreachable,
+                };
+
+                event = .{
+                    .message = logical_message,
+                };
+            }
+
+            return .{
+                .event = event,
+                .derivation = .{
+                    .transport_payload = .{
+                        .transfer = transfer,
+                        .contribution = push_result.contribution,
+                    },
+                },
+            };
+        }
+
+        pub fn pushFrameWithDerivation(
+            self: *Self,
+            frame: FrameView,
+        ) MessageAssemblyError!MessageAssemblyResult {
+            const classification =
+                frame.pgnClassification();
+
+            switch (classification) {
+                .transport_data_transfer => {
+                    return try self.pushTransportDataTransfer(
+                        frame,
+                    );
+                },
+
+                else => {},
+            }
+
+            const event =
+                try self.pushFrame(frame);
+
+            const derivation: MessageAssemblyDerivation =
+                switch (classification) {
+                    .transport_connection_management => blk: {
+                        const assembly_event =
+                            event orelse
+                            break :blk .none;
+
+                        break :blk switch (assembly_event) {
+                            .bam_started => |started| .{
+                                .transport_started = .{
+                                    .source_address = started.source_address,
+                                    .destination_address = 0xff,
+                                    .target_pgn = started.target_pgn,
+                                    .delivery = .bam,
+                                },
+                            },
+
+                            else => .none,
+                        };
+                    },
+
+                    .transport_data_transfer => unreachable,
+
+                    else => .{
+                        .direct_message = .{
+                            .offset = 0,
+                            .byte_length = frame.data().len,
+                        },
+                    },
+                };
+
+            return .{
+                .event = event,
+                .derivation = derivation,
+            };
+        }
+
         pub fn pushFrame(
             self: *Self,
             frame: FrameView,
@@ -585,51 +740,9 @@ pub fn MessageAssembler(
                 },
 
                 .transport_data_transfer => {
-                    const packet =
-                        try transport.parseDataTransferData(
-                            frame.data(),
-                        );
-
-                    const destination_address =
-                        identifier.destination_address orelse
-                        return error.NoActiveTransfer;
-
-                    const session =
-                        self.findSession(
-                            identifier.source_address,
-                            destination_address,
-                        ) orelse
-                        return error.NoActiveTransfer;
-
-                    const completed =
-                        try session.reassembler.pushData(
-                            identifier.source_address,
-                            packet.sequence_number,
-                            packet.data,
-                        );
-
-                    if (completed) |message| {
-                        const delivery = session.delivery;
-
-                        session.occupied = false;
-
-                        const logical_message = switch (delivery) {
-                            .bam => MessageView.fromBam(message),
-
-                            .rts_cts => MessageView.fromRtsCts(
-                                message,
-                                destination_address,
-                            ),
-
-                            .single_frame => unreachable,
-                        };
-
-                        return .{
-                            .message = logical_message,
-                        };
-                    }
-
-                    return null;
+                    return (try self.pushTransportDataTransfer(
+                        frame,
+                    )).event;
                 },
 
                 else => {
@@ -1648,6 +1761,267 @@ test "message assembler routes ordinary J1939 frame to logical message" {
                 u8,
                 &payload,
                 message.data(),
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "message assembler reports direct logical message derivation" {
+    const payload = [_]u8{
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0xff,
+        0xff,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18feca80,
+        .extended,
+        .data,
+        8,
+        &payload,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    const result =
+        try assembler.pushFrameWithDerivation(
+            frame,
+        );
+
+    try std.testing.expect(
+        result.event != null,
+    );
+
+    switch (result.derivation) {
+        .direct_message => |contribution| {
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                contribution.offset,
+            );
+
+            try std.testing.expectEqual(
+                payload.len,
+                contribution.byte_length,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "message assembler reports BAM transfer start derivation" {
+    const bam_data = [_]u8{
+        0x20,
+        10,
+        0,
+        2,
+        0xff,
+        0xca,
+        0xfe,
+        0x00,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x18ecff80,
+        .extended,
+        .data,
+        8,
+        &bam_data,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    const result =
+        try assembler.pushFrameWithDerivation(
+            frame,
+        );
+
+    const assembly_event =
+        result.event orelse
+        return error.TestUnexpectedResult;
+
+    switch (assembly_event) {
+        .bam_started => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (result.derivation) {
+        .transport_started => |transfer| {
+            try std.testing.expectEqual(
+                @as(u8, 0x80),
+                transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xff),
+                transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, pgn_diagnostic_message_1),
+                transfer.target_pgn,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.bam,
+                transfer.delivery,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "message assembler reports transport payload derivation" {
+    const bam_data = [_]u8{
+        0x20,
+        10,
+        0,
+        2,
+        0xff,
+        0xca,
+        0xfe,
+        0x00,
+    };
+
+    const packet_1_data = [_]u8{
+        1,
+        0x00,
+        0x55,
+        0x45,
+        0x23,
+        0xa7,
+        0x0c,
+        0x34,
+    };
+
+    const packet_2_data = [_]u8{
+        2,
+        0x12,
+        0x83,
+        0x02,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+    };
+
+    const bam_can_frame = try can.FrameView.fromParts(
+        0x18ecff80,
+        .extended,
+        .data,
+        8,
+        &bam_data,
+    );
+
+    const packet_1_can_frame = try can.FrameView.fromParts(
+        0x18ebff80,
+        .extended,
+        .data,
+        8,
+        &packet_1_data,
+    );
+
+    const packet_2_can_frame = try can.FrameView.fromParts(
+        0x18ebff80,
+        .extended,
+        .data,
+        8,
+        &packet_2_data,
+    );
+
+    const bam_frame =
+        try FrameView.fromCanFrame(bam_can_frame);
+
+    const packet_1 =
+        try FrameView.fromCanFrame(packet_1_can_frame);
+
+    const packet_2 =
+        try FrameView.fromCanFrame(packet_2_can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    _ = try assembler.pushFrameWithDerivation(
+        bam_frame,
+    );
+
+    const first =
+        try assembler.pushFrameWithDerivation(
+            packet_1,
+        );
+
+    try std.testing.expect(
+        first.event == null,
+    );
+
+    switch (first.derivation) {
+        .transport_payload => |derivation| {
+            try std.testing.expectEqual(
+                @as(u8, 0x80),
+                derivation.transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xff),
+                derivation.transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, pgn_diagnostic_message_1),
+                derivation.transfer.target_pgn,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.bam,
+                derivation.transfer.delivery,
+            );
+
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                derivation.contribution.offset,
+            );
+
+            try std.testing.expectEqual(
+                @as(usize, 7),
+                derivation.contribution.byte_length,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second =
+        try assembler.pushFrameWithDerivation(
+            packet_2,
+        );
+
+    try std.testing.expect(
+        second.event != null,
+    );
+
+    switch (second.derivation) {
+        .transport_payload => |derivation| {
+            try std.testing.expectEqual(
+                @as(usize, 7),
+                derivation.contribution.offset,
+            );
+
+            try std.testing.expectEqual(
+                @as(usize, 3),
+                derivation.contribution.byte_length,
             );
         },
 
