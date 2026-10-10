@@ -302,16 +302,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const View =
-        correlation.CaptureCorrelationView(
+        correlation.CaptureDiagnosticView(
             256,
             1024,
             j1939.transport.reassembly.maximum_message_size,
+            1024,
         );
 
     const view =
         View.init(
             &endpoints,
             &identities,
+            &diagnostics,
         );
 
     std.debug.print(
@@ -351,67 +353,19 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
-    var diagnostic_index: usize = 0;
-
-    while (diagnostics.evidenceAt(diagnostic_index)) |stored| : (diagnostic_index += 1) {
-        switch (stored.evidence.*) {
-            .j1587_diagnostic_code => |value| {
-                std.debug.print(
-                    "diagnostic evidence #{} capture observations={}: J1587 MID {X:0>2} diagnostic code {any}\n",
-                    .{
-                        diagnostic_index,
-                        stored.capture_observation_count,
-                        value.source_mid,
-                        value,
-                    },
-                );
-            },
-
-            .j1939_dm1_lamps => |value| {
-                std.debug.print(
-                    "diagnostic evidence #{} capture observations={}: J1939 SA {X:0>2} DM1 lamps delivery={s} statuses={any} flashes={any}\n",
-                    .{
-                        diagnostic_index,
-                        stored.capture_observation_count,
-                        value.source_address,
-                        @tagName(value.delivery),
-                        value.statuses,
-                        value.flashes,
-                    },
-                );
-            },
-
-            .j1939_dm1_diagnostic_trouble_code => |value| {
-                std.debug.print(
-                    "diagnostic evidence #{} capture observations={}: J1939 SA {X:0>2} DM1 DTC delivery={s} trouble_code={any}\n",
-                    .{
-                        diagnostic_index,
-                        stored.capture_observation_count,
-                        value.source_address,
-                        @tagName(value.delivery),
-                        value.trouble_code,
-                    },
-                );
-            },
-        }
-    }
-
-    if (diagnostics.count() != 0) {
-        std.debug.print("\n", .{});
-    }
-
     var endpoint_index: usize = 0;
 
     while (view.endpointAt(endpoint_index)) |endpoint| : (endpoint_index += 1) {
         switch (endpoint.key) {
             .j1939_source_address => |source_address| {
                 std.debug.print(
-                    "\nJ1939 SA {X:0>2}: presence={} observations={} identity evidence={}\n",
+                    "\nJ1939 SA {X:0>2}: presence={} observations={} identity evidence={} diagnostic evidence={}\n",
                     .{
                         source_address,
                         endpoint.presence_count,
                         endpoint.observation_count,
                         endpoint.identity_evidence_count,
+                        endpoint.diagnostic_evidence_count,
                     },
                 );
 
@@ -445,15 +399,61 @@ pub fn main(init: std.process.Init) !void {
 
             .j1587_mid => |mid| {
                 std.debug.print(
-                    "\nJ1587 MID {d}: presence={} observations={} identity evidence={}\n",
+                    "\nJ1587 MID {d}: presence={} observations={} identity evidence={} diagnostic evidence={}\n",
                     .{
                         mid,
                         endpoint.presence_count,
                         endpoint.observation_count,
                         endpoint.identity_evidence_count,
+                        endpoint.diagnostic_evidence_count,
                     },
                 );
             },
+        }
+
+        var diagnostic_index: usize = 0;
+
+        while (view.diagnosticEvidenceAt(
+            endpoint.key,
+            diagnostic_index,
+        )) |diagnostic| : (diagnostic_index += 1) {
+            std.debug.print(
+                "  diagnostic evidence #{d} capture observations={}: ",
+                .{
+                    diagnostic_index,
+                    diagnostic.capture_observation_count,
+                },
+            );
+
+            switch (diagnostic.evidence.*) {
+                .j1587_diagnostic_code => |value| {
+                    std.debug.print(
+                        "J1587 diagnostic code {any}\n",
+                        .{value},
+                    );
+                },
+
+                .j1939_dm1_lamps => |value| {
+                    std.debug.print(
+                        "J1939 DM1 lamps delivery={s} statuses={any} flashes={any}\n",
+                        .{
+                            @tagName(value.delivery),
+                            value.statuses,
+                            value.flashes,
+                        },
+                    );
+                },
+
+                .j1939_dm1_diagnostic_trouble_code => |value| {
+                    std.debug.print(
+                        "J1939 DM1 DTC delivery={s} trouble_code={any}\n",
+                        .{
+                            @tagName(value.delivery),
+                            value.trouble_code,
+                        },
+                    );
+                },
+            }
         }
 
         var identity_index: usize = 0;
