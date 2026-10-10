@@ -478,6 +478,8 @@ pub fn main(
     var standard_can_frames: usize = 0;
     var extended_can_frames: usize = 0;
 
+    var next_frame_occurrence_index: usize = 0;
+
     var observed_18da_frames: usize = 0;
 
     var single_frames: usize = 0;
@@ -515,6 +517,8 @@ pub fn main(
     var multi_did_requests: usize = 0;
     var read_did_positive_responses: usize = 0;
     var malformed_read_did_positive_responses: usize = 0;
+
+    var trace_f157_response_active = false;
 
     var router =
         isotp.SessionRouter(
@@ -559,6 +563,11 @@ pub fn main(
 
             .can => |record| record,
         };
+
+        const frame_occurrence_index =
+            next_frame_occurrence_index;
+
+        next_frame_occurrence_index += 1;
 
         switch (record.identifier_format) {
             .standard => {
@@ -642,8 +651,24 @@ pub fn main(
             continue;
         }
 
-        const event =
-            router.push(
+        var is_f157_response_start = false;
+
+        switch (frame) {
+            .first_frame => |first| {
+                is_f157_response_start =
+                    source_address == 0x00 and
+                    destination_address == 0xf1 and
+                    first.data.len >= 3 and
+                    first.data[0] == 0x62 and
+                    first.data[1] == 0xf1 and
+                    first.data[2] == 0x57;
+            },
+
+            else => {},
+        }
+
+        const push_result =
+            router.pushWithDerivation(
                 source_address,
                 destination_address,
                 frame,
@@ -676,6 +701,92 @@ pub fn main(
 
                 continue;
             };
+
+        const event =
+            push_result.event;
+
+        switch (push_result.derivation) {
+            .transport_started => |derivation| {
+                if (is_f157_response_start) {
+                    trace_f157_response_active = true;
+
+                    std.debug.print(
+                        "lineage occurrence #{} timestamp={s} {s} ch:{}: ISO-TP start+payload {X:0>2}->{X:0>2} offset={} length={} {s}\n",
+                        .{
+                            frame_occurrence_index,
+                            record.timestamp_text,
+                            @tagName(record.direction),
+                            record.channel,
+                            derivation.transfer.source_address,
+                            derivation.transfer.destination_address,
+                            derivation.contribution.offset,
+                            derivation.contribution.byte_length,
+                            @tagName(derivation.transfer.delivery),
+                        },
+                    );
+                }
+            },
+
+            .transport_context => |transfer| {
+                if (trace_f157_response_active and
+                    transfer.source_address == 0x00 and
+                    transfer.destination_address == 0xf1)
+                {
+                    std.debug.print(
+                        "lineage occurrence #{} timestamp={s} {s} ch:{}: ISO-TP context for transfer {X:0>2}->{X:0>2} {s}\n",
+                        .{
+                            frame_occurrence_index,
+                            record.timestamp_text,
+                            @tagName(record.direction),
+                            record.channel,
+                            transfer.source_address,
+                            transfer.destination_address,
+                            @tagName(transfer.delivery),
+                        },
+                    );
+                }
+            },
+
+            .transport_payload => |derivation| {
+                if (trace_f157_response_active and
+                    derivation.transfer.source_address == 0x00 and
+                    derivation.transfer.destination_address == 0xf1)
+                {
+                    std.debug.print(
+                        "lineage occurrence #{} timestamp={s} {s} ch:{}: ISO-TP payload {X:0>2}->{X:0>2} offset={} length={} {s}\n",
+                        .{
+                            frame_occurrence_index,
+                            record.timestamp_text,
+                            @tagName(record.direction),
+                            record.channel,
+                            derivation.transfer.source_address,
+                            derivation.transfer.destination_address,
+                            derivation.contribution.offset,
+                            derivation.contribution.byte_length,
+                            @tagName(derivation.transfer.delivery),
+                        },
+                    );
+                }
+            },
+
+            .none => {},
+            .direct_message => {},
+        }
+
+        if (trace_f157_response_active) {
+            switch (event) {
+                .completed => |message| {
+                    if (message.source_address == 0x00 and
+                        message.destination_address == 0xf1 and
+                        message.delivery == .multi_frame)
+                    {
+                        trace_f157_response_active = false;
+                    }
+                },
+
+                else => {},
+            }
+        }
 
         switch (event) {
             .in_progress => {},
