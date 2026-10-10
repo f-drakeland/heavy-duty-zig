@@ -403,10 +403,34 @@ pub const RoutedFlowControl = struct {
     matched_active_transfer: bool,
 };
 
+pub const RoutedTransfer = struct {
+    source_address: u8,
+    destination_address: u8,
+    delivery: MessageDelivery,
+};
+
+pub const RoutedPayloadContribution = struct {
+    transfer: RoutedTransfer,
+    contribution: PayloadContribution,
+};
+
+pub const SessionDerivation = union(enum) {
+    none,
+    direct_message: RoutedPayloadContribution,
+    transport_started: RoutedPayloadContribution,
+    transport_payload: RoutedPayloadContribution,
+    transport_context: RoutedTransfer,
+};
+
 pub const SessionEvent = union(enum) {
     in_progress,
     completed: RoutedMessage,
     flow_control: RoutedFlowControl,
+};
+
+pub const SessionPushResult = struct {
+    event: SessionEvent,
+    derivation: SessionDerivation,
 };
 
 pub const SessionError =
@@ -502,6 +526,19 @@ pub fn SessionRouter(
             destination_address: u8,
             frame: Frame,
         ) SessionError!SessionEvent {
+            return (try self.pushWithDerivation(
+                source_address,
+                destination_address,
+                frame,
+            )).event;
+        }
+
+        pub fn pushWithDerivation(
+            self: *Self,
+            source_address: u8,
+            destination_address: u8,
+            frame: Frame,
+        ) SessionError!SessionPushResult {
             switch (frame) {
                 .single_frame => |single| {
                     if (self.findSession(
@@ -512,12 +549,28 @@ pub fn SessionRouter(
                             return error.TransferAlreadyActive;
                         }
                     }
+
                     return .{
-                        .completed = .{
-                            .source_address = source_address,
-                            .destination_address = destination_address,
-                            .payload = single.payload,
-                            .delivery = .single_frame,
+                        .event = .{
+                            .completed = .{
+                                .source_address = source_address,
+                                .destination_address = destination_address,
+                                .payload = single.payload,
+                                .delivery = .single_frame,
+                            },
+                        },
+                        .derivation = .{
+                            .direct_message = .{
+                                .transfer = .{
+                                    .source_address = source_address,
+                                    .destination_address = destination_address,
+                                    .delivery = .single_frame,
+                                },
+                                .contribution = .{
+                                    .offset = 0,
+                                    .byte_length = single.payload.len,
+                                },
+                            },
                         },
                     };
                 },
@@ -529,23 +582,41 @@ pub fn SessionRouter(
                             destination_address,
                         );
 
-                    const completed =
-                        try session.reassembler.push(
+                    const result =
+                        try session.reassembler.pushWithContribution(
                             frame,
                         );
 
-                    if (completed) |message| {
-                        return .{
-                            .completed = .{
-                                .source_address = source_address,
-                                .destination_address = destination_address,
-                                .payload = message.payload,
-                                .delivery = message.delivery,
-                            },
-                        };
-                    }
+                    const contribution =
+                        result.contribution orelse
+                        unreachable;
 
-                    return .in_progress;
+                    const event: SessionEvent =
+                        if (result.completed) |message|
+                            .{
+                                .completed = .{
+                                    .source_address = source_address,
+                                    .destination_address = destination_address,
+                                    .payload = message.payload,
+                                    .delivery = message.delivery,
+                                },
+                            }
+                        else
+                            .in_progress;
+
+                    return .{
+                        .event = event,
+                        .derivation = .{
+                            .transport_started = .{
+                                .transfer = .{
+                                    .source_address = source_address,
+                                    .destination_address = destination_address,
+                                    .delivery = .multi_frame,
+                                },
+                                .contribution = contribution,
+                            },
+                        },
+                    };
                 },
 
                 .consecutive_frame => {
@@ -560,45 +631,82 @@ pub fn SessionRouter(
                         return error.NoActiveTransfer;
                     }
 
-                    const completed =
-                        try session.reassembler.push(
+                    const result =
+                        try session.reassembler.pushWithContribution(
                             frame,
                         );
 
-                    if (completed) |message| {
-                        return .{
-                            .completed = .{
-                                .source_address = source_address,
-                                .destination_address = destination_address,
-                                .payload = message.payload,
-                                .delivery = message.delivery,
-                            },
-                        };
-                    }
+                    const contribution =
+                        result.contribution orelse
+                        unreachable;
 
-                    return .in_progress;
+                    const event: SessionEvent =
+                        if (result.completed) |message|
+                            .{
+                                .completed = .{
+                                    .source_address = source_address,
+                                    .destination_address = destination_address,
+                                    .payload = message.payload,
+                                    .delivery = message.delivery,
+                                },
+                            }
+                        else
+                            .in_progress;
+
+                    return .{
+                        .event = event,
+                        .derivation = .{
+                            .transport_payload = .{
+                                .transfer = .{
+                                    .source_address = source_address,
+                                    .destination_address = destination_address,
+                                    .delivery = .multi_frame,
+                                },
+                                .contribution = contribution,
+                            },
+                        },
+                    };
                 },
 
                 .flow_control => |flow_control| {
-                    const transfer =
-                        self.findSession(
-                            destination_address,
-                            source_address,
-                        );
+                    const matched_transfer: ?*Session =
+                        blk: {
+                            const session =
+                                self.findSession(
+                                    destination_address,
+                                    source_address,
+                                ) orelse
+                                break :blk null;
 
-                    const matched_active_transfer =
-                        if (transfer) |session|
-                            session.reassembler.isActive()
+                            if (!session.reassembler.isActive()) {
+                                break :blk null;
+                            }
+
+                            break :blk session;
+                        };
+
+                    const derivation: SessionDerivation =
+                        if (matched_transfer) |session|
+                            .{
+                                .transport_context = .{
+                                    .source_address = session.source_address,
+                                    .destination_address = session.destination_address,
+                                    .delivery = .multi_frame,
+                                },
+                            }
                         else
-                            false;
+                            .none;
 
                     return .{
-                        .flow_control = .{
-                            .source_address = source_address,
-                            .destination_address = destination_address,
-                            .flow_control = flow_control,
-                            .matched_active_transfer = matched_active_transfer,
+                        .event = .{
+                            .flow_control = .{
+                                .source_address = source_address,
+                                .destination_address = destination_address,
+                                .flow_control = flow_control,
+                                .matched_active_transfer = matched_transfer != null,
+                            },
                         },
+                        .derivation = derivation,
                     };
                 },
 
@@ -1284,6 +1392,194 @@ test "routes authentic bidirectional ISO-TP transfer" {
         },
 
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "router reports authentic ISO-TP assembly derivation" {
+    const first_data = [_]u8{
+        0x10, 0x16, 0x62, 0xf1,
+        0x95, 0x00, 0x02, 0x56,
+    };
+
+    const flow_control_data = [_]u8{
+        0x30, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+
+    const consecutive_data = [_][8]u8{
+        .{
+            0x21, 0x00, 0x01, 0x52,
+            0x15, 0x00, 0x00, 0x61,
+        },
+        .{
+            0x22, 0x0a, 0x01, 0x0a,
+            0x03, 0x0a, 0x0c, 0x00,
+        },
+        .{
+            0x23, 0x00, 0x00, 0x0a,
+            0x03, 0x0a, 0x0c, 0x00,
+        },
+    };
+
+    const expected_offsets = [_]usize{
+        6,
+        13,
+        20,
+    };
+
+    const expected_lengths = [_]usize{
+        7,
+        7,
+        2,
+    };
+
+    var router =
+        SessionRouter(4, 64){};
+
+    const first_result =
+        try router.pushWithDerivation(
+            0x00,
+            0xf1,
+            try parse(&first_data),
+        );
+
+    try std.testing.expect(
+        first_result.event == .in_progress,
+    );
+
+    switch (first_result.derivation) {
+        .transport_started => |derivation| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                derivation.transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf1),
+                derivation.transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.multi_frame,
+                derivation.transfer.delivery,
+            );
+
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                derivation.contribution.offset,
+            );
+
+            try std.testing.expectEqual(
+                @as(usize, 6),
+                derivation.contribution.byte_length,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const flow_control_result =
+        try router.pushWithDerivation(
+            0xf1,
+            0x00,
+            try parse(&flow_control_data),
+        );
+
+    switch (flow_control_result.event) {
+        .flow_control => |flow_control| {
+            try std.testing.expect(
+                flow_control.matched_active_transfer,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (flow_control_result.derivation) {
+        .transport_context => |transfer| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf1),
+                transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.multi_frame,
+                transfer.delivery,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    for (consecutive_data, 0..) |data, index| {
+        const result =
+            try router.pushWithDerivation(
+                0x00,
+                0xf1,
+                try parse(&data),
+            );
+
+        switch (result.derivation) {
+            .transport_payload => |derivation| {
+                try std.testing.expectEqual(
+                    @as(u8, 0x00),
+                    derivation.transfer.source_address,
+                );
+
+                try std.testing.expectEqual(
+                    @as(u8, 0xf1),
+                    derivation.transfer.destination_address,
+                );
+
+                try std.testing.expectEqual(
+                    MessageDelivery.multi_frame,
+                    derivation.transfer.delivery,
+                );
+
+                try std.testing.expectEqual(
+                    expected_offsets[index],
+                    derivation.contribution.offset,
+                );
+
+                try std.testing.expectEqual(
+                    expected_lengths[index],
+                    derivation.contribution.byte_length,
+                );
+            },
+
+            else => return error.TestUnexpectedResult,
+        }
+
+        if (index < 2) {
+            try std.testing.expect(
+                result.event == .in_progress,
+            );
+        } else {
+            const message = switch (result.event) {
+                .completed => |message| message,
+                else => return error.TestUnexpectedResult,
+            };
+
+            const expected = [_]u8{
+                0x62, 0xf1, 0x95, 0x00,
+                0x02, 0x56, 0x00, 0x01,
+                0x52, 0x15, 0x00, 0x00,
+                0x61, 0x0a, 0x01, 0x0a,
+                0x03, 0x0a, 0x0c, 0x00,
+                0x00, 0x00,
+            };
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &expected,
+                message.payload,
+            );
+        }
     }
 }
 
