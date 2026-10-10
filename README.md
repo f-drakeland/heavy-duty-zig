@@ -57,6 +57,53 @@ J1708/J1587, J1939, and observed ISO-TP/UDS traffic.
 - ReadDataByIdentifier response structure and DID evidence
 - exact cross-protocol payload correlation without assuming shared physical identity
 
+## Using Heavy Duty Zig
+
+Heavy Duty Zig exposes the Zig module `heavy_duty`.
+
+For a local checkout, add HDZ to the consuming project's `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .heavy_duty_zig = .{
+        .path = "../heavy-duty-zig",
+    },
+},
+```
+
+Resolve the dependency in `build.zig`:
+
+```zig
+const heavy_duty_dependency =
+    b.dependency("heavy_duty_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+const heavy_duty =
+    heavy_duty_dependency.module("heavy_duty");
+```
+
+Then make the module available to the consuming root module:
+
+```zig
+.imports = &.{
+    .{
+        .name = "heavy_duty",
+        .module = heavy_duty,
+    },
+},
+```
+
+Application code can then import the library with:
+
+```zig
+const heavy_duty = @import("heavy_duty");
+```
+
+This dependency path has been validated from a separate Zig 0.17 consumer
+project.
+
 ## Design
 
 Protocol layers report protocol facts.
