@@ -3,6 +3,7 @@ const Io = std.Io;
 
 const correlation = @import("correlation.zig");
 const capture_lineage = @import("capture_lineage.zig");
+const j1939_capture_lineage = @import("j1939_capture_lineage.zig");
 const evidence_lineage = @import("evidence_lineage.zig");
 const ddec_csv = @import("ddec_csv.zig");
 const isotp = @import("isotp.zig");
@@ -88,6 +89,28 @@ const OwnedComponentSample = struct {
             self.lineage_contributions[0..contributions.len],
             contributions,
         );
+
+        self.lineage_contribution_count =
+            contributions.len;
+    }
+
+    fn setMessageLineage(
+        self: *OwnedComponentSample,
+        contributions: []const capture_lineage.MessagePayloadContribution,
+    ) ComponentSampleError!void {
+        if (contributions.len >
+            self.lineage_contributions.len)
+        {
+            return error.ComponentLineageCapacityExceeded;
+        }
+
+        for (contributions, 0..) |contribution, index| {
+            self.lineage_contributions[index] = .{
+                .frame_occurrence = contribution.frame_occurrence,
+                .evidence_offset = contribution.message_offset,
+                .byte_length = contribution.byte_length,
+            };
+        }
 
         self.lineage_contribution_count =
             contributions.len;
@@ -187,12 +210,13 @@ fn collectJ1939ComponentSamples(
 
     var next_frame_occurrence_index: usize = 0;
 
-    var active_component_transfer: ?j1939.TransportTransfer = null;
+    const LineageTracker =
+        j1939_capture_lineage.J1939TransportLineageTracker(
+            4,
+            component_lineage_capacity,
+        );
 
-    var component_contributions: [component_lineage_capacity]capture_lineage.EvidencePayloadContribution =
-        undefined;
-
-    var component_contribution_count: usize = 0;
+    var lineage_tracker: LineageTracker = .{};
 
     var lines =
         std.mem.splitScalar(
@@ -245,6 +269,7 @@ fn collectJ1939ComponentSamples(
                 continue;
 
         var direct_component_contribution: ?capture_lineage.EvidencePayloadContribution = null;
+        var completed_transport_lineage: ?LineageTracker.CompletedLineage = null;
 
         const assembly_result =
             assembler.pushFrameWithDerivation(
@@ -254,42 +279,27 @@ fn collectJ1939ComponentSamples(
 
         switch (assembly_result.derivation) {
             .transport_started => |transfer| {
-                if (transfer.target_pgn ==
-                    j1939.pgn_component_identification)
-                {
-                    active_component_transfer =
-                        transfer;
-
-                    component_contribution_count = 0;
-                }
+                try lineage_tracker.start(
+                    transfer,
+                );
             },
 
             .transport_payload => |derivation| {
-                if (active_component_transfer) |active| {
-                    if (std.meta.eql(
-                        active,
-                        derivation.transfer,
-                    )) {
-                        if (component_contribution_count >=
-                            component_contributions.len)
-                        {
-                            return error.ComponentLineageCapacityExceeded;
-                        }
+                try lineage_tracker.recordPayload(
+                    frame_occurrence,
+                    derivation,
+                );
 
-                        component_contributions[
-                            component_contribution_count
-                        ] = .{
-                            .frame_occurrence = frame_occurrence,
+                if (assembly_result.event) |assembly_event| {
+                    switch (assembly_event) {
+                        .message => {
+                            completed_transport_lineage =
+                                try lineage_tracker.finish(
+                                    derivation.transfer,
+                                );
+                        },
 
-                            // Component-identification correlation evidence
-                            // is the complete logical FEEB payload, so the
-                            // message-relative range is also evidence-relative.
-                            .evidence_offset = derivation.contribution.offset,
-
-                            .byte_length = derivation.contribution.byte_length,
-                        };
-
-                        component_contribution_count += 1;
+                        else => {},
                     }
                 }
             },
@@ -317,27 +327,6 @@ fn collectJ1939ComponentSamples(
 
         switch (assembly_event) {
             .message => |message| {
-                const completes_active_component_transfer =
-                    if (active_component_transfer) |active|
-                        active.target_pgn == message.pgn() and
-                            active.source_address ==
-                                message.sourceAddress() and
-                            active.delivery ==
-                                message.delivery() and
-                            message.destinationAddress() ==
-                                @as(
-                                    ?u8,
-                                    active.destination_address,
-                                )
-                    else
-                        false;
-
-                defer {
-                    if (completes_active_component_transfer) {
-                        active_component_transfer = null;
-                        component_contribution_count = 0;
-                    }
-                }
                 var cursor =
                     j1939.MessageCursor.init(
                         message,
@@ -379,9 +368,9 @@ fn collectJ1939ComponentSamples(
                                         try sample.setLineage(
                                             &direct,
                                         );
-                                    } else if (completes_active_component_transfer) {
-                                        try sample.setLineage(
-                                            component_contributions[0..component_contribution_count],
+                                    } else if (completed_transport_lineage) |lineage| {
+                                        try sample.setMessageLineage(
+                                            lineage.slice(),
                                         );
                                     }
 
@@ -395,6 +384,14 @@ fn collectJ1939ComponentSamples(
                             }
                         },
                     }
+                }
+            },
+
+            .transport_aborted => |aborted| {
+                if (aborted.transfer) |transfer| {
+                    try lineage_tracker.abort(
+                        transfer,
+                    );
                 }
             },
 

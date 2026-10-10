@@ -17,6 +17,20 @@ pub const FrameOccurrenceId = struct {
     }
 };
 
+/// Records the logical-message-relative bytes supplied by one frame occurrence.
+///
+/// This preserves provenance through protocol reassembly before any later
+/// diagnostic evidence is selected from the logical message. `message_offset`
+/// is relative to the beginning of that complete logical message.
+///
+/// This does not imply that the contributed bytes participate in durable
+/// diagnostic evidence.
+pub const MessagePayloadContribution = struct {
+    frame_occurrence: FrameOccurrenceId,
+    message_offset: usize,
+    byte_length: usize,
+};
+
 /// Records the evidence-relative bytes supplied by one frame occurrence.
 ///
 /// This describes payload contribution only. Transport control or other
