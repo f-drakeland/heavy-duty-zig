@@ -104,6 +104,44 @@ const heavy_duty = @import("heavy_duty");
 This dependency path has been validated from a separate Zig 0.17 consumer
 project.
 
+## Public cross-protocol lineage demo
+
+A small synthetic capture is included at
+`captures/public/cross_protocol_lineage_demo.csv`.
+
+The fixture contains no authentic vehicle identity data. It carries the
+synthetic 33-byte Component Identification payload:
+
+```text
+HDZ*PUBLIC-DEMO*SYNTH0001*UNIT01*
+```
+
+The same payload is transported independently as:
+
+- J1939 PGN 65259 / FEEB Component Identification through directed RTS/CTS;
+- UDS ReadDataByIdentifier DID F157 through multi-frame ISO-TP.
+
+Run the public proof with:
+
+```sh
+zig run src/ddec_cross_protocol_inspect.zig -- \
+    captures/public/cross_protocol_lineage_demo.csv
+```
+
+The result preserves separate occurrence lineage on both protocol paths and
+then records an `exact_payload_equality` relationship between the two durable
+evidence values.
+
+The J1939 evidence comes from five TP.DT frame occurrences. RTS and CTS remain
+transport context and are not payload contributors.
+
+The UDS evidence comes from the ISO-TP First Frame plus five Consecutive
+Frames. The Flow Control frame remains transport context and is not a payload
+contributor.
+
+The demo intentionally proves evidence equality only. It does not claim that
+the two observations identify the same physical ECU.
+
 ## Design
 
 Protocol layers report protocol facts.

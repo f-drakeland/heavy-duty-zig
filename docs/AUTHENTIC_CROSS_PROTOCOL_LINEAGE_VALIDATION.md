@@ -83,12 +83,18 @@ capture frame occurrence
 
 ## Current limits
 
-This is an authentic-capture developer-inspector proof of the architecture, not
-yet a generalized capture-ingestion pipeline.
+This remains an authentic-capture developer-inspector proof of the architecture,
+not yet a generalized capture-ingestion pipeline.
 
-The J1939 component-lineage collector used by this proof is narrower than the
-multi-session protocol assembler and should not be treated as general
-concurrent-transfer lineage handling.
+The J1939 and ISO-TP sides now use reusable bounded capture-lineage trackers
+rather than proof-specific single-transfer lineage state. Protocol reassembly
+remains authoritative for transfer membership and message-relative payload
+derivation, while capture orchestration attaches frame-occurrence identity.
+
+Diagnostic evidence selection is still performed by the focused
+cross-protocol inspector. The validation therefore demonstrates reusable
+transport-lineage machinery and evidence projection, but not yet a general
+capture-to-diagnostic-output application pipeline.
 
 The validation also does not establish that the matching J1939 and UDS evidence
 came from the same physical ECU. The retained relationship states only what the
