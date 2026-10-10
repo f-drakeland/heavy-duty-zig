@@ -2108,6 +2108,206 @@ test "message assembler reports CTS as transport context" {
     }
 }
 
+test "message assembler reports authentic RTS CTS payload contributions" {
+    const rts_data = [_]u8{
+        0x10,
+        0x21,
+        0x00,
+        0x05,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const cts_data = [_]u8{
+        0x11,
+        0x05,
+        0x01,
+        0xff,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const packet_data = [_][8]u8{
+        .{
+            1,
+            0x44,
+            0x54,
+            0x44,
+            0x53,
+            0x43,
+            0x2a,
+            0x34,
+        },
+        .{
+            2,
+            0x37,
+            0x31,
+            0x4e,
+            0x31,
+            0x30,
+            0x2a,
+            0x53,
+        },
+        .{
+            3,
+            0x30,
+            0x30,
+            0x36,
+            0x36,
+            0x39,
+            0x35,
+            0x31,
+        },
+        .{
+            4,
+            0x2a,
+            0x36,
+            0x31,
+            0x31,
+            0x30,
+            0x33,
+            0x35,
+        },
+        .{
+            5,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x2a,
+            0xff,
+            0xff,
+        },
+    };
+
+    const expected_payload = [_]u8{
+        0x44, 0x54, 0x44, 0x53, 0x43, 0x2a, 0x34,
+        0x37, 0x31, 0x4e, 0x31, 0x30, 0x2a, 0x53,
+        0x30, 0x30, 0x36, 0x36, 0x39, 0x35, 0x31,
+        0x2a, 0x36, 0x31, 0x31, 0x30, 0x33, 0x35,
+        0x00, 0x00, 0x00, 0x00, 0x2a,
+    };
+
+    const expected_lengths = [_]usize{
+        7,
+        7,
+        7,
+        7,
+        5,
+    };
+
+    const rts_can_frame = try can.FrameView.fromParts(
+        0x1cecf900,
+        .extended,
+        .data,
+        8,
+        &rts_data,
+    );
+
+    const cts_can_frame = try can.FrameView.fromParts(
+        0x1cec00f9,
+        .extended,
+        .data,
+        8,
+        &cts_data,
+    );
+
+    const rts_frame =
+        try FrameView.fromCanFrame(rts_can_frame);
+
+    const cts_frame =
+        try FrameView.fromCanFrame(cts_can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    _ = try assembler.pushFrameWithDerivation(
+        rts_frame,
+    );
+
+    _ = try assembler.pushFrameWithDerivation(
+        cts_frame,
+    );
+
+    for (packet_data, 0..) |data, index| {
+        const can_frame = try can.FrameView.fromParts(
+            0x1cebf900,
+            .extended,
+            .data,
+            8,
+            &data,
+        );
+
+        const frame =
+            try FrameView.fromCanFrame(can_frame);
+
+        const result =
+            try assembler.pushFrameWithDerivation(
+                frame,
+            );
+
+        switch (result.derivation) {
+            .transport_payload => |derivation| {
+                try std.testing.expectEqual(
+                    index * 7,
+                    derivation.contribution.offset,
+                );
+
+                try std.testing.expectEqual(
+                    expected_lengths[index],
+                    derivation.contribution.byte_length,
+                );
+
+                try std.testing.expectEqual(
+                    @as(u8, 0x00),
+                    derivation.transfer.source_address,
+                );
+
+                try std.testing.expectEqual(
+                    @as(u8, 0xf9),
+                    derivation.transfer.destination_address,
+                );
+
+                try std.testing.expectEqual(
+                    @as(u32, pgn_component_identification),
+                    derivation.transfer.target_pgn,
+                );
+
+                try std.testing.expectEqual(
+                    MessageDelivery.rts_cts,
+                    derivation.transfer.delivery,
+                );
+            },
+
+            else => return error.TestUnexpectedResult,
+        }
+
+        if (index < 4) {
+            try std.testing.expect(
+                result.event == null,
+            );
+        } else {
+            const event =
+                result.event orelse
+                return error.TestUnexpectedResult;
+
+            const message = switch (event) {
+                .message => |message| message,
+                else => return error.TestUnexpectedResult,
+            };
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &expected_payload,
+                message.data(),
+            );
+        }
+    }
+}
+
 test "message assembler reports transport payload derivation" {
     const bam_data = [_]u8{
         0x20,
