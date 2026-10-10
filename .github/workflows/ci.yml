@@ -23,8 +23,5 @@ jobs:
         with:
           version: 0.17.0
 
-      - name: Check formatting
-        run: zig fmt --check build.zig src
-
-      - name: Run test suite
-        run: zig build test
+      - name: Run repository checks
+        run: zig build check

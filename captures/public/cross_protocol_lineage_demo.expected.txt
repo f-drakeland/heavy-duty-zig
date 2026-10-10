@@ -1,0 +1,25 @@
+lineage: J1939 FEEB occurrence #0 -> evidence #0 contributors=5
+  frame occurrence #2 -> evidence offset=0 length=7
+  frame occurrence #3 -> evidence offset=7 length=7
+  frame occurrence #4 -> evidence offset=14 length=7
+  frame occurrence #5 -> evidence offset=21 length=7
+  frame occurrence #6 -> evidence offset=28 length=5
+lineage: UDS F157 occurrence #1 -> evidence #1 contributors=6
+  frame occurrence #7 -> evidence offset=0 length=3
+  frame occurrence #9 -> evidence offset=3 length=7
+  frame occurrence #10 -> evidence offset=10 length=7
+  frame occurrence #11 -> evidence offset=17 length=7
+  frame occurrence #12 -> evidence offset=24 length=7
+  frame occurrence #13 -> evidence offset=31 length=2
+match: J1939 SA 00 rts_cts <-> UDS 00->F1 DID 0xF157 multi_frame: 33 bytes
+
+J1939 component payloads preserved: 1
+UDS DID responses examined: 1
+UDS DID evidence rejected: 0
+exact cross-protocol payload matches: 1
+durable exact-payload relationships preserved: 1
+
+capture-level evidence relationships:
+  relationship #0 reason=exact_payload_equality byte_length=33
+    left evidence #0 occurrences=1: J1939 SA 00 rts_cts component-identification payload
+    right evidence #1 occurrences=1: UDS 00->F1 DID 0xF157 multi_frame response data

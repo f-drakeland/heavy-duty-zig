@@ -104,6 +104,23 @@ const heavy_duty = @import("heavy_duty");
 This dependency path has been validated from a separate Zig 0.17 consumer
 project.
 
+## Verification
+
+With Zig 0.17, run the canonical repository verification command:
+
+```sh
+zig build check
+```
+
+This checks repository formatting, runs the library test suite, and verifies
+the public cross-protocol lineage demo against its expected output.
+
+To run the public demonstration interactively instead:
+
+```sh
+zig build demo
+```
+
 ## Public cross-protocol lineage demo
 
 A small synthetic capture is included at
