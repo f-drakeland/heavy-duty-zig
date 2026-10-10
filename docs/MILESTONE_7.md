@@ -23,6 +23,32 @@ Unfinished decoding items are not automatically current roadmap obligations;
 additional PGN, PID, or DID support remains driven by demonstrated diagnostic
 value in authentic evidence.
 
+### Post-redirection checkpoint
+
+The redirected work has now established an occurrence-level evidence-lineage
+path across the J1939 and ISO-TP/UDS sides of the authentic capture.
+
+Protocol reassembly reports payload derivation without owning capture metadata.
+Capture orchestration assigns frame-occurrence identity and can preserve the
+exact frame occurrences that contributed bytes to durable correlation evidence.
+
+The authentic cross-protocol proof now retains:
+
+- five J1939 TP.DT frame occurrences contributing the 33-byte FEEB Component
+  Identification evidence;
+- six ISO-TP frame occurrences contributing the corresponding 33-byte UDS F157
+  evidence after projecting past the UDS service and DID bytes; and
+- a durable `exact_payload_equality` relationship between those two evidence
+  values.
+
+Transport-control frames remain distinct from payload contributors.
+
+This is currently an authentic-capture developer-inspector proof of the lineage
+architecture, not yet a generalized capture-ingestion pipeline. In particular,
+the J1939 component-lineage collector used by the proof is narrower than the
+multi-session protocol assembler and should not be described as general
+concurrent-transfer lineage handling.
+
 ## Goal
 
 Establish a passive, manufacturer-neutral J1939 controller identity and network
