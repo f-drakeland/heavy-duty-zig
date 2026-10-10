@@ -14,6 +14,9 @@ const max_capture_bytes =
     64 * 1024 * 1024;
 
 const component_sample_capacity = 16;
+// Developer-CLI bound for contributors retained with one component sample.
+// This is not a J1939 protocol limit.
+const component_lineage_capacity = 16;
 const correlation_evidence_capacity = 256;
 const relationship_capacity = 256;
 const lineage_occurrence_capacity = 4;
@@ -25,6 +28,7 @@ const ComponentSampleError = error{
     MissingRawPayload,
     ComponentPayloadTooLarge,
     ComponentSampleCapacityExceeded,
+    ComponentLineageCapacityExceeded,
 };
 
 const OwnedComponentSample = struct {
@@ -36,6 +40,11 @@ const OwnedComponentSample = struct {
         undefined,
 
     len: usize = 0,
+
+    lineage_contributions: [component_lineage_capacity]capture_lineage.EvidencePayloadContribution =
+        undefined,
+
+    lineage_contribution_count: usize = 0,
 
     fn fromObservation(
         component: j1939.ComponentIdentificationObservation,
@@ -63,6 +72,31 @@ const OwnedComponentSample = struct {
         result.len = raw_payload.len;
 
         return result;
+    }
+
+    fn setLineage(
+        self: *OwnedComponentSample,
+        contributions: []const capture_lineage.EvidencePayloadContribution,
+    ) ComponentSampleError!void {
+        if (contributions.len >
+            self.lineage_contributions.len)
+        {
+            return error.ComponentLineageCapacityExceeded;
+        }
+
+        @memcpy(
+            self.lineage_contributions[0..contributions.len],
+            contributions,
+        );
+
+        self.lineage_contribution_count =
+            contributions.len;
+    }
+
+    fn lineage(
+        self: *const OwnedComponentSample,
+    ) []const capture_lineage.EvidencePayloadContribution {
+        return self.lineage_contributions[0..self.lineage_contribution_count];
     }
 
     fn payload(
@@ -151,6 +185,15 @@ fn collectJ1939ComponentSamples(
             4,
         ){};
 
+    var next_frame_occurrence_index: usize = 0;
+
+    var active_component_transfer: ?j1939.TransportTransfer = null;
+
+    var component_contributions: [component_lineage_capacity]capture_lineage.EvidencePayloadContribution =
+        undefined;
+
+    var component_contribution_count: usize = 0;
+
     var lines =
         std.mem.splitScalar(
             u8,
@@ -181,6 +224,12 @@ fn collectJ1939ComponentSamples(
             .can => |record| record,
         };
 
+        const frame_occurrence: capture_lineage.FrameOccurrenceId = .{
+            .index = next_frame_occurrence_index,
+        };
+
+        next_frame_occurrence_index += 1;
+
         if (record.identifier_format != .extended) {
             continue;
         }
@@ -195,18 +244,100 @@ fn collectJ1939ComponentSamples(
             ) catch
                 continue;
 
-        const maybe_assembly_event =
-            assembler.pushFrame(
+        var direct_component_contribution: ?capture_lineage.EvidencePayloadContribution = null;
+
+        const assembly_result =
+            assembler.pushFrameWithDerivation(
                 frame,
             ) catch
                 continue;
 
+        switch (assembly_result.derivation) {
+            .transport_started => |transfer| {
+                if (transfer.target_pgn ==
+                    j1939.pgn_component_identification)
+                {
+                    active_component_transfer =
+                        transfer;
+
+                    component_contribution_count = 0;
+                }
+            },
+
+            .transport_payload => |derivation| {
+                if (active_component_transfer) |active| {
+                    if (std.meta.eql(
+                        active,
+                        derivation.transfer,
+                    )) {
+                        if (component_contribution_count >=
+                            component_contributions.len)
+                        {
+                            return error.ComponentLineageCapacityExceeded;
+                        }
+
+                        component_contributions[
+                            component_contribution_count
+                        ] = .{
+                            .frame_occurrence = frame_occurrence,
+
+                            // Component-identification correlation evidence
+                            // is the complete logical FEEB payload, so the
+                            // message-relative range is also evidence-relative.
+                            .evidence_offset = derivation.contribution.offset,
+
+                            .byte_length = derivation.contribution.byte_length,
+                        };
+
+                        component_contribution_count += 1;
+                    }
+                }
+            },
+
+            .direct_message => |contribution| {
+                if (frame.identifier().pgn ==
+                    j1939.pgn_component_identification)
+                {
+                    direct_component_contribution = .{
+                        .frame_occurrence = frame_occurrence,
+                        .evidence_offset = contribution.offset,
+                        .byte_length = contribution.byte_length,
+                    };
+                }
+            },
+
+            .none,
+            .transport_context,
+            => {},
+        }
+
         const assembly_event =
-            maybe_assembly_event orelse
+            assembly_result.event orelse
             continue;
 
         switch (assembly_event) {
             .message => |message| {
+                const completes_active_component_transfer =
+                    if (active_component_transfer) |active|
+                        active.target_pgn == message.pgn() and
+                            active.source_address ==
+                                message.sourceAddress() and
+                            active.delivery ==
+                                message.delivery() and
+                            message.destinationAddress() ==
+                                @as(
+                                    ?u8,
+                                    active.destination_address,
+                                )
+                    else
+                        false;
+
+                defer {
+                    if (completes_active_component_transfer) {
+                        active_component_transfer = null;
+                        component_contribution_count = 0;
+                    }
+                }
                 var cursor =
                     j1939.MessageCursor.init(
                         message,
@@ -234,10 +365,28 @@ fn collectJ1939ComponentSamples(
                                         return error.ComponentSampleCapacityExceeded;
                                     }
 
-                                    samples[sample_count.*] =
+                                    var sample =
                                         try OwnedComponentSample.fromObservation(
                                             component,
                                         );
+
+                                    if (direct_component_contribution) |contribution| {
+                                        const direct =
+                                            [_]capture_lineage.EvidencePayloadContribution{
+                                                contribution,
+                                            };
+
+                                        try sample.setLineage(
+                                            &direct,
+                                        );
+                                    } else if (completes_active_component_transfer) {
+                                        try sample.setLineage(
+                                            component_contributions[0..component_contribution_count],
+                                        );
+                                    }
+
+                                    samples[sample_count.*] =
+                                        sample;
 
                                     sample_count.* += 1;
                                 },
@@ -290,6 +439,8 @@ fn inspectUdsMatches(
     var evidence_inventory: EvidenceInventory = .{};
     var relationships: Relationships = .{};
     var evidence_occurrences: EvidenceOccurrences = .{};
+    var j1939_occurrence_recorded: [component_sample_capacity]bool =
+        @splat(false);
 
     var next_frame_occurrence_index: usize = 0;
 
@@ -488,7 +639,8 @@ fn inspectUdsMatches(
 
                 for (
                     samples[0..sample_count],
-                ) |*sample| {
+                    0..,
+                ) |*sample, sample_index| {
                     const component =
                         sample.observation() catch
                             continue;
@@ -512,6 +664,56 @@ fn inspectUdsMatches(
                         try evidence_inventory.observe(
                             j1939_owned,
                         );
+
+                    if (!j1939_occurrence_recorded[
+                        sample_index
+                    ]) {
+                        const lineage =
+                            sample.lineage();
+
+                        if (lineage.len == 0) {
+                            return error.J1939ComponentLineageMissing;
+                        }
+
+                        const occurrence_id =
+                            try evidence_occurrences.record(
+                                j1939_result.id,
+                                lineage,
+                            );
+
+                        const occurrence =
+                            evidence_occurrences
+                                .occurrence(
+                                occurrence_id,
+                            ) orelse
+                            return error.RecordedOccurrenceMissing;
+
+                        std.debug.print(
+                            "lineage: J1939 FEEB occurrence #{} -> evidence #{} contributors={}\n",
+                            .{
+                                occurrence.id.index,
+                                occurrence.value_id.index,
+                                occurrence.contributions.len,
+                            },
+                        );
+
+                        for (
+                            occurrence.contributions,
+                        ) |contribution| {
+                            std.debug.print(
+                                "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                .{
+                                    contribution.frame_occurrence.index,
+                                    contribution.evidence_offset,
+                                    contribution.byte_length,
+                                },
+                            );
+                        }
+
+                        j1939_occurrence_recorded[
+                            sample_index
+                        ] = true;
+                    }
 
                     const uds_owned =
                         try CorrelationEvidence
