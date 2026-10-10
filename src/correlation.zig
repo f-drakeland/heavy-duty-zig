@@ -1675,6 +1675,119 @@ pub fn CaptureCorrelationView(
     };
 }
 
+/// Read-only capture-local diagnostic view across endpoint, identity, and
+/// diagnostic evidence.
+///
+/// This composes the existing correlation view with diagnostic evidence for
+/// reporting and inspection. It does not promote protocol endpoints to
+/// permanent controller, component, vehicle, or physical ECU identities.
+/// Callers are responsible for supplying inventories populated from the same
+/// capture observation stream.
+pub fn CaptureDiagnosticView(
+    comptime endpoint_capacity: usize,
+    comptime identity_evidence_capacity: usize,
+    comptime text_capacity: usize,
+    comptime diagnostic_evidence_capacity: usize,
+) type {
+    const Endpoints =
+        EndpointInventory(endpoint_capacity);
+
+    const Identities =
+        IdentityEvidenceInventory(
+            identity_evidence_capacity,
+            text_capacity,
+        );
+
+    const Diagnostics =
+        DiagnosticEvidenceInventory(
+            diagnostic_evidence_capacity,
+        );
+
+    const CorrelationView =
+        CaptureCorrelationView(
+            endpoint_capacity,
+            identity_evidence_capacity,
+            text_capacity,
+        );
+
+    return struct {
+        const Self = @This();
+
+        pub const EndpointView = struct {
+            key: EndpointKey,
+            presence_count: usize,
+            observation_count: usize,
+            identity_evidence_count: usize,
+            diagnostic_evidence_count: usize,
+        };
+
+        correlation_view: CorrelationView,
+        diagnostics: *const Diagnostics,
+
+        pub fn init(
+            endpoints: *const Endpoints,
+            identities: *const Identities,
+            diagnostics: *const Diagnostics,
+        ) Self {
+            return .{
+                .correlation_view = CorrelationView.init(
+                    endpoints,
+                    identities,
+                ),
+                .diagnostics = diagnostics,
+            };
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.correlation_view.count();
+        }
+
+        pub fn endpointAt(
+            self: *const Self,
+            index: usize,
+        ) ?EndpointView {
+            const endpoint =
+                self.correlation_view.endpointAt(index) orelse
+                return null;
+
+            return .{
+                .key = endpoint.key,
+                .presence_count = endpoint.presence_count,
+                .observation_count = endpoint.observation_count,
+                .identity_evidence_count = endpoint.identity_evidence_count,
+                .diagnostic_evidence_count = self.diagnostics
+                    .evidenceCountForEndpoint(
+                    endpoint.key,
+                ),
+            };
+        }
+
+        pub fn identityEvidenceAt(
+            self: *const Self,
+            key: EndpointKey,
+            index: usize,
+        ) ?Identities.EvidenceView {
+            return self.correlation_view.identityEvidenceAt(
+                key,
+                index,
+            );
+        }
+
+        pub fn diagnosticEvidenceAt(
+            self: *const Self,
+            key: EndpointKey,
+            index: usize,
+        ) ?Diagnostics.EvidenceView {
+            return self.diagnostics.evidenceForEndpointAt(
+                key,
+                index,
+            );
+        }
+    };
+}
+
 pub fn fromJ1587(
     observation: j1587.Observation,
 ) EndpointObservation {
@@ -3914,6 +4027,188 @@ test "capture correlation view reports endpoint identity evidence" {
     try std.testing.expectEqual(
         @as(usize, 0),
         second_endpoint.identity_evidence_count,
+    );
+}
+
+test "capture diagnostic view composes endpoint identity and diagnostic evidence" {
+    const claim = fromJ1939(.{
+        .address_claim = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .name = .{
+                .raw = 0x1003030000400064,
+            },
+        },
+    });
+
+    const lamps = fromJ1939(.{
+        .dm1_lamps = .{
+            .source_address = 0x80,
+            .delivery = .single_frame,
+            .statuses = .{
+                .malfunction_indicator = .off,
+                .red_stop = .off,
+                .amber_warning = .off,
+                .protect = .code_3,
+            },
+            .flashes = .{
+                .malfunction_indicator = .code_3,
+                .red_stop = .code_3,
+                .amber_warning = .code_3,
+                .protect = .code_3,
+            },
+        },
+    });
+
+    const other_endpoint = fromJ1939(.{
+        .eec1_engine_speed = .{
+            .source_address = 0x81,
+            .delivery = .single_frame,
+            .raw = 0x25c0,
+            .rpm = 1208.0,
+        },
+    });
+
+    var endpoints =
+        EndpointInventory(4){};
+
+    var identities =
+        IdentityEvidenceInventory(4, 32){};
+
+    var diagnostics =
+        DiagnosticEvidenceInventory(4){};
+
+    const observations = [_]EndpointObservation{
+        claim,
+        lamps,
+        lamps,
+        other_endpoint,
+    };
+
+    for (observations) |observation| {
+        _ = try endpoints.observe(
+            observation,
+        );
+
+        _ = try identities.observe(
+            observation,
+        );
+
+        _ = try diagnostics.observe(
+            observation,
+        );
+    }
+
+    const View =
+        CaptureDiagnosticView(
+            4,
+            4,
+            32,
+            4,
+        );
+
+    const view =
+        View.init(
+            &endpoints,
+            &identities,
+            &diagnostics,
+        );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        view.count(),
+    );
+
+    const first_endpoint =
+        view.endpointAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        first_endpoint.key.eql(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        first_endpoint.observation_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        first_endpoint.identity_evidence_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        first_endpoint.diagnostic_evidence_count,
+    );
+
+    const identity =
+        view.identityEvidenceAt(
+            first_endpoint.key,
+            0,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        identity.occurrence_count,
+    );
+
+    const diagnostic =
+        view.diagnosticEvidenceAt(
+            first_endpoint.key,
+            0,
+        ) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        diagnostic.capture_observation_count,
+    );
+
+    switch (diagnostic.evidence.*) {
+        .j1939_dm1_lamps => |value| {
+            try std.testing.expectEqual(
+                @as(u8, 0x80),
+                value.source_address,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second_endpoint =
+        view.endpointAt(1) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        second_endpoint.key.eql(.{
+            .j1939_source_address = 0x81,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        second_endpoint.observation_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        second_endpoint.identity_evidence_count,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        second_endpoint.diagnostic_evidence_count,
+    );
+
+    try std.testing.expect(
+        view.diagnosticEvidenceAt(
+            second_endpoint.key,
+            0,
+        ) == null,
     );
 }
 
