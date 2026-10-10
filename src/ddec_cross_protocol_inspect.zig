@@ -2,6 +2,8 @@ const std = @import("std");
 const Io = std.Io;
 
 const correlation = @import("correlation.zig");
+const capture_lineage = @import("capture_lineage.zig");
+const evidence_lineage = @import("evidence_lineage.zig");
 const ddec_csv = @import("ddec_csv.zig");
 const isotp = @import("isotp.zig");
 const j1939 = @import("j1939.zig");
@@ -14,6 +16,8 @@ const max_capture_bytes =
 const component_sample_capacity = 16;
 const correlation_evidence_capacity = 256;
 const relationship_capacity = 256;
+const lineage_occurrence_capacity = 4;
+const lineage_contribution_capacity = 16;
 const session_capacity = 16;
 const payload_capacity = 4095;
 
@@ -107,6 +111,33 @@ fn destinationAddress(
     identifier: u32,
 ) u8 {
     return @truncate(identifier >> 8);
+}
+
+fn appendProjectedEvidenceContribution(
+    storage: []capture_lineage.EvidencePayloadContribution,
+    count: *usize,
+    frame_occurrence: capture_lineage.FrameOccurrenceId,
+    message_contribution: correlation.PayloadRange,
+    evidence_span: correlation.PayloadRange,
+) !void {
+    const projected =
+        correlation.projectPayloadContribution(
+            message_contribution,
+            evidence_span,
+        ) orelse
+        return;
+
+    if (count.* >= storage.len) {
+        return error.LineageContributionCapacityExceeded;
+    }
+
+    storage[count.*] = .{
+        .frame_occurrence = frame_occurrence,
+        .evidence_offset = projected.offset,
+        .byte_length = projected.byte_length,
+    };
+
+    count.* += 1;
 }
 
 fn collectJ1939ComponentSamples(
@@ -250,8 +281,25 @@ fn inspectUdsMatches(
     const Relationships =
         correlation.EvidenceRelationshipInventory(relationship_capacity);
 
+    const EvidenceOccurrences =
+        evidence_lineage.CorrelationEvidenceOccurrenceInventory(
+            lineage_occurrence_capacity,
+            lineage_contribution_capacity,
+        );
+
     var evidence_inventory: EvidenceInventory = .{};
     var relationships: Relationships = .{};
+    var evidence_occurrences: EvidenceOccurrences = .{};
+
+    var next_frame_occurrence_index: usize = 0;
+
+    var f157_response_active = false;
+    var f157_evidence_span: ?correlation.PayloadRange = null;
+
+    var f157_contributions: [lineage_contribution_capacity]capture_lineage.EvidencePayloadContribution =
+        undefined;
+
+    var f157_contribution_count: usize = 0;
 
     var lines =
         std.mem.splitScalar(
@@ -282,6 +330,12 @@ fn inspectUdsMatches(
             .non_can => continue,
             .can => |record| record,
         };
+
+        const frame_occurrence: capture_lineage.FrameOccurrenceId = .{
+            .index = next_frame_occurrence_index,
+        };
+
+        next_frame_occurrence_index += 1;
 
         if (record.identifier_format != .extended) {
             continue;
@@ -316,13 +370,86 @@ fn inspectUdsMatches(
             continue;
         }
 
-        const event =
-            router.push(
+        var f157_start_span: ?correlation.PayloadRange = null;
+
+        switch (frame) {
+            .first_frame => |first| {
+                if (source_address == 0x00 and
+                    destination_address == 0xf1 and
+                    first.message_length >= 3 and
+                    first.data.len >= 3 and
+                    first.data[0] == 0x62 and
+                    first.data[1] == 0xf1 and
+                    first.data[2] == 0x57)
+                {
+                    f157_start_span = .{
+                        .offset = 3,
+                        .byte_length = @as(usize, first.message_length) - 3,
+                    };
+                }
+            },
+
+            else => {},
+        }
+
+        const push_result =
+            router.pushWithDerivation(
                 source_address,
                 destination_address,
                 frame,
             ) catch
                 continue;
+
+        const event =
+            push_result.event;
+
+        switch (push_result.derivation) {
+            .transport_started => |derivation| {
+                if (f157_start_span) |span| {
+                    f157_response_active = true;
+                    f157_evidence_span = span;
+                    f157_contribution_count = 0;
+
+                    try appendProjectedEvidenceContribution(
+                        &f157_contributions,
+                        &f157_contribution_count,
+                        frame_occurrence,
+                        .{
+                            .offset = derivation.contribution.offset,
+                            .byte_length = derivation.contribution.byte_length,
+                        },
+                        span,
+                    );
+                }
+            },
+
+            .transport_payload => |derivation| {
+                if (f157_response_active and
+                    derivation.transfer.source_address == 0x00 and
+                    derivation.transfer.destination_address == 0xf1)
+                {
+                    const span =
+                        f157_evidence_span orelse
+                        return error.F157EvidenceSpanMissing;
+
+                    try appendProjectedEvidenceContribution(
+                        &f157_contributions,
+                        &f157_contribution_count,
+                        frame_occurrence,
+                        .{
+                            .offset = derivation.contribution.offset,
+                            .byte_length = derivation.contribution.byte_length,
+                        },
+                        span,
+                    );
+                }
+            },
+
+            .none,
+            .direct_message,
+            .transport_context,
+            => {},
+        }
 
         switch (event) {
             .in_progress => {},
@@ -330,6 +457,19 @@ fn inspectUdsMatches(
             .flow_control => {},
 
             .completed => |message| {
+                const completes_traced_f157 =
+                    f157_response_active and
+                    message.source_address == 0x00 and
+                    message.destination_address == 0xf1 and
+                    message.delivery == .multi_frame;
+
+                defer {
+                    if (completes_traced_f157) {
+                        f157_response_active = false;
+                        f157_evidence_span = null;
+                        f157_contribution_count = 0;
+                    }
+                }
                 const maybe_evidence =
                     correlation
                         .fromUdsReadDataByIdentifierResponse(
@@ -344,6 +484,7 @@ fn inspectUdsMatches(
                     continue;
 
                 uds_did_responses += 1;
+                var f157_occurrence_recorded = false;
 
                 for (
                     samples[0..sample_count],
@@ -382,6 +523,58 @@ fn inspectUdsMatches(
                         try evidence_inventory.observe(
                             uds_owned,
                         );
+
+                    if (completes_traced_f157 and
+                        uds_evidence.data_identifier == 0xf157 and
+                        !f157_occurrence_recorded)
+                    {
+                        const span =
+                            f157_evidence_span orelse
+                            return error.F157EvidenceSpanMissing;
+
+                        if (span.byte_length !=
+                            uds_evidence.data_after_identifier.len)
+                        {
+                            return error.F157EvidenceSpanMismatch;
+                        }
+
+                        const occurrence_id =
+                            try evidence_occurrences.record(
+                                uds_result.id,
+                                f157_contributions[0..f157_contribution_count],
+                            );
+
+                        const occurrence =
+                            evidence_occurrences
+                                .occurrence(
+                                occurrence_id,
+                            ) orelse
+                            return error.RecordedOccurrenceMissing;
+
+                        std.debug.print(
+                            "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
+                            .{
+                                occurrence.id.index,
+                                occurrence.value_id.index,
+                                occurrence.contributions.len,
+                            },
+                        );
+
+                        for (
+                            occurrence.contributions,
+                        ) |contribution| {
+                            std.debug.print(
+                                "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                .{
+                                    contribution.frame_occurrence.index,
+                                    contribution.evidence_offset,
+                                    contribution.byte_length,
+                                },
+                            );
+                        }
+
+                        f157_occurrence_recorded = true;
+                    }
 
                     const durable_relationship =
                         evidence_inventory
