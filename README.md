@@ -97,6 +97,15 @@ permanent controller or physical ECU identity. Active diagnostic requests,
 fault clearing, programming operations, and physical-layer acquisition are
 not implemented yet.
 
+Occurrence-level evidence lineage has also been validated in focused
+developer-inspector paths against authentic J1939 and ISO-TP/UDS capture data.
+Both sides of a 33-byte cross-protocol evidence relationship can be traced
+independently to the exact frame occurrences that supplied their payload bytes.
+See [Authentic Cross-Protocol Lineage Validation](docs/AUTHENTIC_CROSS_PROTOCOL_LINEAGE_VALIDATION.md).
+
+This validation demonstrates the architecture; the lineage orchestration is not
+yet a generalized capture-ingestion pipeline.
+
 ## Tracking
 
 Current diagnostic direction:
@@ -111,15 +120,17 @@ Current diagnostic direction:
 4. Preserve unsupported, ambiguous, incomplete, and conflicting evidence
    instead of silently assigning higher-level meaning.
 
-The current architectural problem is occurrence-level provenance. HDZ can
-already build capture-local endpoint, identity, and diagnostic inventories and
-preserve durable cross-protocol value relationships with explicit association
-reasons. Exact repeated values may collapse into durable evidence values while
-retaining observation counts, but J1939 and ISO-TP reassembly do not yet carry
-complete source-record or timestamp provenance into the resulting logical
-observations.
+Occurrence-level provenance is now established at the architectural level.
+Protocol reassembly reports derivation facts without owning capture metadata,
+while capture orchestration can preserve the exact frame occurrences that
+contributed bytes to durable evidence.
 
-Before HDZ introduces durable temporal, request/response, or sequence
-relationships, it needs a capture-level occurrence model that can preserve the
-capture evidence contributing to each logical observation without moving
-capture metadata into protocol-layer types.
+This has been validated against authentic J1939 and ISO-TP/UDS traffic: both
+sides of an exact 33-byte cross-protocol payload relationship retain their own
+capture-frame lineage while transport-control frames remain separate from
+payload contributors.
+
+The current work is to generalize that proven lineage model beyond the focused
+developer-inspector paths, then use occurrence identity to support richer
+temporal, request/response, sequence, and state-transition relationships without
+promoting those relationships into unsupported physical-device claims.
