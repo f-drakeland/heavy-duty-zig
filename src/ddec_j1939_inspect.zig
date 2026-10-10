@@ -96,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     var extended_can_frames: usize = 0;
 
     var j1939_frames: usize = 0;
+    var next_frame_occurrence_index: usize = 0;
     var j1939_rejected: usize = 0;
 
     var messages: usize = 0;
@@ -162,6 +163,10 @@ pub fn main(init: std.process.Init) !void {
 
             .can => |record| record,
         };
+        const frame_occurrence_index =
+            next_frame_occurrence_index;
+
+        next_frame_occurrence_index += 1;
 
         switch (record.identifier_format) {
             .standard => {
@@ -203,13 +208,83 @@ pub fn main(init: std.process.Init) !void {
             return;
         };
 
-        const maybe_assembly_event =
-            assembler.pushFrame(
+        const assembly_result =
+            assembler.pushFrameWithDerivation(
                 frame,
             ) catch {
                 assembly_errors += 1;
                 continue;
             };
+
+        const maybe_assembly_event =
+            assembly_result.event;
+
+        switch (assembly_result.derivation) {
+            .transport_started => |transfer| {
+                if (transfer.target_pgn ==
+                    j1939.pgn_component_identification)
+                {
+                    std.debug.print(
+                        "lineage occurrence #{} timestamp={s} {s} ch:{}: TP start {X:0>2}->{X:0>2} PGN 0x{X:0>6} {s}\n",
+                        .{
+                            frame_occurrence_index,
+                            record.timestamp_text,
+                            @tagName(record.direction),
+                            record.channel,
+                            transfer.source_address,
+                            transfer.destination_address,
+                            transfer.target_pgn,
+                            @tagName(transfer.delivery),
+                        },
+                    );
+                }
+            },
+
+            .transport_context => |transfer| {
+                if (transfer.target_pgn ==
+                    j1939.pgn_component_identification)
+                {
+                    std.debug.print(
+                        "lineage occurrence #{} timestamp={s} {s} ch:{}: TP context for transfer {X:0>2}->{X:0>2} PGN 0x{X:0>6} {s}\n",
+                        .{
+                            frame_occurrence_index,
+                            record.timestamp_text,
+                            @tagName(record.direction),
+                            record.channel,
+                            transfer.source_address,
+                            transfer.destination_address,
+                            transfer.target_pgn,
+                            @tagName(transfer.delivery),
+                        },
+                    );
+                }
+            },
+
+            .transport_payload => |derivation| {
+                if (derivation.transfer.target_pgn ==
+                    j1939.pgn_component_identification)
+                {
+                    std.debug.print(
+                        "lineage occurrence #{} timestamp={s} {s} ch:{}: TP payload {X:0>2}->{X:0>2} PGN 0x{X:0>6} offset={} length={} {s}\n",
+                        .{
+                            frame_occurrence_index,
+                            record.timestamp_text,
+                            @tagName(record.direction),
+                            record.channel,
+                            derivation.transfer.source_address,
+                            derivation.transfer.destination_address,
+                            derivation.transfer.target_pgn,
+                            derivation.contribution.offset,
+                            derivation.contribution.byte_length,
+                            @tagName(derivation.transfer.delivery),
+                        },
+                    );
+                }
+            },
+
+            .none => {},
+            .direct_message => {},
+        }
 
         const assembly_event =
             maybe_assembly_event orelse
