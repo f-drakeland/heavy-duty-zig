@@ -822,6 +822,30 @@ pub fn EvidenceRelationshipInventory(
             };
         }
 
+        pub fn relationshipAt(
+            self: *const Self,
+            index: usize,
+        ) ?RelationshipView {
+            var observed_index: usize = 0;
+
+            for (&self.slots, 0..) |*slot, slot_index| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (observed_index == index) {
+                    return .{
+                        .id = .{ .index = slot_index },
+                        .relationship = &slot.relationship,
+                    };
+                }
+
+                observed_index += 1;
+            }
+
+            return null;
+        }
+
         pub fn relationshipCountForEvidence(
             self: *const Self,
             evidence_id: EvidenceValueId,
@@ -2323,6 +2347,64 @@ test "relationship inventory preserves and deduplicates exact relationships" {
 
     try std.testing.expect(
         stored.relationship.eql(relationship),
+    );
+}
+
+test "relationship inventory supports capture-wide indexed access" {
+    var inventory =
+        EvidenceRelationshipInventory(4){};
+
+    const first = EvidenceRelationship{
+        .left = .{ .index = 3 },
+        .right = .{ .index = 7 },
+        .reason = .exact_payload_equality,
+        .byte_length = 33,
+    };
+
+    const second = EvidenceRelationship{
+        .left = .{ .index = 1 },
+        .right = .{ .index = 9 },
+        .reason = .exact_payload_equality,
+        .byte_length = 16,
+    };
+
+    const first_result =
+        try inventory.record(first);
+
+    const second_result =
+        try inventory.record(second);
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
+    );
+
+    const first_view =
+        inventory.relationshipAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        first_view.id.eql(first_result.id),
+    );
+
+    try std.testing.expect(
+        first_view.relationship.eql(first),
+    );
+
+    const second_view =
+        inventory.relationshipAt(1) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expect(
+        second_view.id.eql(second_result.id),
+    );
+
+    try std.testing.expect(
+        second_view.relationship.eql(second),
+    );
+
+    try std.testing.expect(
+        inventory.relationshipAt(2) == null,
     );
 }
 
