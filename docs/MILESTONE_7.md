@@ -1,5 +1,28 @@
 # Heavy Duty Zig — Milestone 7
 
+## Status
+
+**Redirected before completion as originally specified.**
+
+Milestone 7 established important parts of the intended J1939 identity path,
+including Address Claim / NAME evidence, Component Identification evidence,
+capture-local endpoint handling, and durable identity evidence. It did not
+complete every item in the original scope below.
+
+In particular, the J1939 Software Identification and Vehicle Identification
+decoders described by this plan were not completed, and HDZ did not adopt the
+J1939-specific `ControllerApplication` inventory shape sketched here. Instead,
+authentic capture evidence redirected the project toward protocol-neutral
+capture-local endpoint inventories, ISO-TP/UDS observation, cross-protocol
+correlation, durable evidence values, reason-bearing relationships, and
+diagnostic evidence inventories.
+
+The original milestone plan is retained below as historical design context
+rather than rewritten to make the completed implementation appear to match it.
+Unfinished decoding items are not automatically current roadmap obligations;
+additional PGN, PID, or DID support remains driven by demonstrated diagnostic
+value in authentic evidence.
+
 ## Goal
 
 Establish a passive, manufacturer-neutral J1939 controller identity and network

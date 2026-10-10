@@ -1,9 +1,12 @@
 # Heavy Duty Zig
 
-Open truck-side diagnostic infrastructure for Zig.
+Evidence-preserving truck-side diagnostic infrastructure for Zig.
 
 Heavy Duty Zig is a standalone library for observing, decoding, and
-interpreting heavy-duty commercial vehicle network data.
+reasoning about heavy-duty commercial vehicle network data. It preserves
+protocol facts, diagnostic evidence, uncertainty, and evidence-backed
+relationships without silently promoting network observations into stronger
+physical-device claims.
 
 ## Current scope
 
@@ -98,20 +101,25 @@ not implemented yet.
 
 Current diagnostic direction:
 
-1. Correlate observations without prematurely treating network addresses as
-   permanent ECU identity.
-2. Build a passive network/controller inventory from observed evidence such as
-   source address, J1939 NAME, component identification, diagnostic messages,
-   telemetry, and transport relationships.
-3. Add further PGN or parameter decoding when authentic capture evidence shows
-   that it materially improves diagnosis or controller identification.
-4. Preserve unsupported and ambiguous evidence instead of silently assigning
-   higher-level meaning.
+1. Preserve occurrence-level provenance through capture parsing and transport
+   reassembly so logical observations can remain tied to the capture evidence
+   that produced them.
+2. Keep protocol endpoints, durable evidence values, and evidence-backed
+   relationships distinct from permanent controller or physical ECU identity.
+3. Add further PGN, PID, or DID decoding when authentic capture evidence shows
+   that it materially improves diagnosis, identity, or correlation.
+4. Preserve unsupported, ambiguous, incomplete, and conflicting evidence
+   instead of silently assigning higher-level meaning.
 
-The current diagnostic problem is assembling preserved observations and
-evidence-backed relationships into a useful passive capture-level inventory
-without prematurely promoting those relationships to permanent controller or
-physical ECU identity. Durable value-level relationships are now preserved and
-queryable with their association reason. Occurrence-level provenance remains an
-open architecture question for future temporal, request/response, and sequence
-relationships.
+The current architectural problem is occurrence-level provenance. HDZ can
+already build capture-local endpoint, identity, and diagnostic inventories and
+preserve durable cross-protocol value relationships with explicit association
+reasons. Exact repeated values may collapse into durable evidence values while
+retaining observation counts, but J1939 and ISO-TP reassembly do not yet carry
+complete source-record or timestamp provenance into the resulting logical
+observations.
+
+Before HDZ introduces durable temporal, request/response, or sequence
+relationships, it needs a capture-level occurrence model that can preserve the
+capture evidence contributing to each logical observation without moving
+capture metadata into protocol-layer types.

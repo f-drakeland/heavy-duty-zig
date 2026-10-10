@@ -812,19 +812,91 @@ relationships between repeated observations.
 
 ---
 
+## AD-023 — Protocol assembly reports derivation; capture orchestration owns lineage
+
+**Status:** Accepted
+
+### Decision
+
+Occurrence-level provenance belongs to the capture and orchestration layers rather
+than inside protocol data types.
+
+Protocol parsers and reassemblers remain responsible for protocol facts: whether a
+frame was accepted into a transfer, what logical payload bytes it contributed, when
+a transfer completed, and when protocol state was aborted or otherwise changed.
+
+They must not own capture-specific identities, timestamps, line numbers, filenames,
+adapter identities, or other source metadata merely to preserve provenance.
+
+The capture/orchestration layer combines protocol-reported assembly facts with the
+capture occurrence currently being processed. That layer is responsible for
+preserving lineage from observed or recovered frame occurrences through logical
+messages and later diagnostic observations.
+
+Reassembled-message provenance must be capable of identifying the actual
+contributing frame occurrences. A single timestamp or first/last record range is not
+sufficient because unrelated traffic may occur between contributors to one logical
+message.
+
+Durable evidence-value identity remains separate from occurrence identity. Exact
+repeated evidence may continue to collapse into one durable value while individual
+occurrences remain independently traceable.
+
+### Why
+
+Making protocol reassemblers retain capture occurrence identifiers would couple
+capture policy to otherwise capture-independent protocol machinery.
+
+Tracking transport provenance entirely in parallel would create a second component
+that must independently reproduce session membership and reassembly decisions,
+creating the possibility that payload reconstruction and provenance reconstruction
+disagree.
+
+The chosen boundary keeps protocol assembly authoritative while allowing a
+capture-level provenance layer to preserve exact derivation without duplicating
+transport logic.
+
+It also preserves HDZ's bounded-storage architecture: protocol semantics do not
+depend on how much lineage a particular caller chooses to retain.
+
+### Consequence
+
+HDZ should be able to trace a diagnostic observation back through the logical
+message or parameter that produced it and ultimately to the capture occurrences
+that contributed to that result.
+
+Protocol types such as J1708 frame views, CAN frame views, J1939 logical-message
+views, and ISO-TP completed messages remain capture-independent.
+
+Future occurrence-level relationships such as temporal ordering, request/response,
+sequence, and state-transition relationships should reference occurrences rather
+than durable evidence values.
+
+This decision establishes the ownership boundary for provenance. It does not yet
+define the concrete occurrence identifier types, lineage storage representation, or
+transport-context relationship model.
+
+---
+
 # Open architecture questions
 
-How should HDZ preserve occurrence-level provenance for logical observations,
-especially observations assembled from multiple capture records, so future temporal,
-request/response, and sequence relationships can refer to specific occurrences
-without conflating occurrence identity with distinct evidence-value identity?
+The provenance ownership boundary is now established. The remaining design questions
+are narrower:
 
-Current durable evidence storage intentionally collapses exact repeated values while
-retaining an occurrence count. J1939 and ISO-TP reassembly do not yet carry complete
-source-record, line, or timestamp provenance into the resulting logical message.
+- what is the minimum capture-occurrence identity needed across file-backed and
+  future live capture sources;
+- how should a logical-message lineage represent the exact contributing frame
+  occurrences and the payload ranges they supplied;
+- which transport-control occurrences are payload contributors and which should be
+  preserved as related transport context instead;
+- how should source-specific timing evidence be preserved without assuming that
+  timestamps from different capture sources or clock domains are directly
+  comparable;
+- where should bounded lineage storage live so callers can choose retention policy
+  without changing protocol semantics.
 
-That provenance problem should be resolved before HDZ introduces durable
-occurrence-level or temporal relationships.
+These questions should be resolved through small authenticated provenance proofs
+before HDZ introduces durable temporal, request/response, or sequence relationships.
 
 ---
 
