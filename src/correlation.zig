@@ -51,6 +51,91 @@ pub const EndpointObservation = struct {
     endpoint: EndpointKey,
     evidence: Evidence,
 };
+/// Durable diagnostic evidence reported by one protocol endpoint.
+///
+/// These variants preserve the protocol-specific diagnostic representation.
+/// They do not unify J1587 and J1939 fault semantics or establish permanent
+/// controller or physical ECU identity.
+///
+/// The currently supported variants contain only value data and therefore do
+/// not retain borrowed parser or reassembly storage.
+pub const OwnedDiagnosticEvidence = union(enum) {
+    const Self = @This();
+
+    j1587_diagnostic_code: j1587.DiagnosticCode,
+    j1939_dm1_lamps: j1939.Dm1LampObservation,
+    j1939_dm1_diagnostic_trouble_code: j1939.Dm1DiagnosticTroubleCodeObservation,
+
+    pub fn fromEndpointObservation(
+        observation: EndpointObservation,
+    ) ?Self {
+        return switch (observation.evidence) {
+            .j1587 => |evidence| switch (evidence) {
+                .diagnostic_code => |value| .{
+                    .j1587_diagnostic_code = value,
+                },
+
+                else => null,
+            },
+
+            .j1939 => |evidence| switch (evidence) {
+                .dm1_lamps => |value| .{
+                    .j1939_dm1_lamps = value,
+                },
+
+                .dm1_diagnostic_trouble_code => |value| .{
+                    .j1939_dm1_diagnostic_trouble_code = value,
+                },
+
+                else => null,
+            },
+        };
+    }
+
+    pub fn endpoint(
+        self: *const Self,
+    ) EndpointKey {
+        return switch (self.*) {
+            .j1587_diagnostic_code => |value| .{
+                .j1587_mid = value.source_mid,
+            },
+
+            .j1939_dm1_lamps => |value| .{
+                .j1939_source_address = value.source_address,
+            },
+
+            .j1939_dm1_diagnostic_trouble_code => |value| .{
+                .j1939_source_address = value.source_address,
+            },
+        };
+    }
+
+    pub fn eqlExact(
+        self: *const Self,
+        other: *const Self,
+    ) bool {
+        return switch (self.*) {
+            .j1587_diagnostic_code => |value| switch (other.*) {
+                .j1587_diagnostic_code => |other_value| std.meta.eql(value, other_value),
+
+                else => false,
+            },
+
+            .j1939_dm1_lamps => |value| switch (other.*) {
+                .j1939_dm1_lamps => |other_value| std.meta.eql(value, other_value),
+
+                else => false,
+            },
+
+            .j1939_dm1_diagnostic_trouble_code => |value| switch (other.*) {
+                .j1939_dm1_diagnostic_trouble_code => |other_value| std.meta.eql(value, other_value),
+
+                else => false,
+            },
+        };
+    }
+};
+
 /// Borrowed UDS data-identifier evidence with the ISO-TP route on which it
 /// was observed.
 ///
@@ -2029,6 +2114,217 @@ test "relationship inventory queries multiple associations without merging evide
             2,
         ) == null,
     );
+}
+
+test "owned diagnostic evidence preserves protocol-specific fault evidence" {
+    const j1587_evidence =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1587(.{
+                .diagnostic_code = .{
+                    .source_mid = 128,
+                    .identifier_kind = .pid,
+                    .identifier = 194,
+                    .fmi = 5,
+                    .status = .active,
+                    .occurrence_count = 7,
+                },
+            }),
+        ).?;
+
+    try std.testing.expect(
+        j1587_evidence.endpoint().eql(.{
+            .j1587_mid = 128,
+        }),
+    );
+
+    switch (j1587_evidence) {
+        .j1587_diagnostic_code => |value| {
+            try std.testing.expectEqual(
+                @as(u16, 194),
+                value.identifier,
+            );
+            try std.testing.expectEqual(
+                @as(?u8, 7),
+                value.occurrence_count,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const j1939_evidence =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1939(.{
+                .dm1_diagnostic_trouble_code = .{
+                    .source_address = 0x00,
+                    .delivery = .bam,
+                    .trouble_code = .{
+                        .spn = 1234,
+                        .fmi = 3,
+                        .occurrence_count = 9,
+                        .conversion_method = false,
+                        .raw = .{ 0x11, 0x22, 0x33, 0x44 },
+                    },
+                },
+            }),
+        ).?;
+
+    try std.testing.expect(
+        j1939_evidence.endpoint().eql(.{
+            .j1939_source_address = 0x00,
+        }),
+    );
+
+    switch (j1939_evidence) {
+        .j1939_dm1_diagnostic_trouble_code => |value| {
+            try std.testing.expectEqual(
+                @as(?u32, 1234),
+                value.trouble_code.spn,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 9),
+                value.trouble_code.occurrence_count,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "owned diagnostic evidence uses exact protocol evidence equality" {
+    const first =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1587(.{
+                .diagnostic_code = .{
+                    .source_mid = 128,
+                    .identifier_kind = .pid,
+                    .identifier = 194,
+                    .fmi = 5,
+                    .status = .active,
+                    .occurrence_count = 7,
+                },
+            }),
+        ).?;
+
+    const repeated =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1587(.{
+                .diagnostic_code = .{
+                    .source_mid = 128,
+                    .identifier_kind = .pid,
+                    .identifier = 194,
+                    .fmi = 5,
+                    .status = .active,
+                    .occurrence_count = 7,
+                },
+            }),
+        ).?;
+
+    const changed_reported_count =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1587(.{
+                .diagnostic_code = .{
+                    .source_mid = 128,
+                    .identifier_kind = .pid,
+                    .identifier = 194,
+                    .fmi = 5,
+                    .status = .active,
+                    .occurrence_count = 8,
+                },
+            }),
+        ).?;
+
+    try std.testing.expect(
+        first.eqlExact(&repeated),
+    );
+
+    try std.testing.expect(
+        !first.eqlExact(&changed_reported_count),
+    );
+
+    try std.testing.expect(
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1939(.{
+                .eec1_engine_speed = .{
+                    .source_address = 0x00,
+                    .delivery = .single_frame,
+                    .raw = 0x25c0,
+                    .rpm = 1208.0,
+                },
+            }),
+        ) == null,
+    );
+}
+
+test "owned diagnostic evidence preserves J1939 DM1 lamp state" {
+    const first =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1939(.{
+                .dm1_lamps = .{
+                    .source_address = 0x80,
+                    .delivery = .single_frame,
+                    .statuses = .{
+                        .malfunction_indicator = .on,
+                        .red_stop = .off,
+                        .amber_warning = .on,
+                        .protect = .off,
+                    },
+                    .flashes = .{
+                        .malfunction_indicator = .slow,
+                        .red_stop = .slow,
+                        .amber_warning = .fast,
+                        .protect = .slow,
+                    },
+                },
+            }),
+        ).?;
+
+    const repeated =
+        OwnedDiagnosticEvidence.fromEndpointObservation(
+            fromJ1939(.{
+                .dm1_lamps = .{
+                    .source_address = 0x80,
+                    .delivery = .single_frame,
+                    .statuses = .{
+                        .malfunction_indicator = .on,
+                        .red_stop = .off,
+                        .amber_warning = .on,
+                        .protect = .off,
+                    },
+                    .flashes = .{
+                        .malfunction_indicator = .slow,
+                        .red_stop = .slow,
+                        .amber_warning = .fast,
+                        .protect = .slow,
+                    },
+                },
+            }),
+        ).?;
+
+    try std.testing.expect(
+        first.endpoint().eql(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expect(
+        first.eqlExact(&repeated),
+    );
+
+    switch (first) {
+        .j1939_dm1_lamps => |value| {
+            try std.testing.expectEqual(
+                j1939.dm1.LampStatus.on,
+                value.statuses.malfunction_indicator,
+            );
+            try std.testing.expectEqual(
+                j1939.dm1.LampFlash.fast,
+                value.flashes.amber_warning,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "J1587 observation retains MID endpoint" {
