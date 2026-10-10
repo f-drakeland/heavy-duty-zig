@@ -317,3 +317,186 @@ test "keeps interleaved ISO-TP transfer lineage isolated" {
         a[2].message_offset,
     );
 }
+
+test "router derivation keeps ISO-TP lineage synchronized across rejected frames" {
+    const first_data = [_]u8{
+        0x10, 0x09,
+        0xaa, 0xbb,
+        0xcc, 0xdd,
+        0xee, 0xff,
+    };
+
+    const flow_control_data = [_]u8{
+        0x30, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+
+    const wrong_sequence_data = [_]u8{
+        0x22,
+        0x10,
+        0x11,
+        0x12,
+        0x13,
+        0x14,
+        0x15,
+        0x16,
+    };
+
+    const correct_sequence_data = [_]u8{
+        0x21,
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+    };
+
+    var router =
+        isotp.SessionRouter(2, 64){};
+
+    const Tracker =
+        IsotpTransportLineageTracker(2, 64);
+
+    var tracker: Tracker = .{};
+
+    const first_result =
+        try router.pushWithDerivation(
+            0x00,
+            0xf1,
+            try isotp.parse(&first_data),
+        );
+
+    try std.testing.expect(
+        first_result.event == .in_progress,
+    );
+
+    switch (first_result.derivation) {
+        .transport_started => |derivation| {
+            try tracker.start(
+                .{ .index = 100 },
+                derivation,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const flow_control_result =
+        try router.pushWithDerivation(
+            0xf1,
+            0x00,
+            try isotp.parse(&flow_control_data),
+        );
+
+    switch (flow_control_result.derivation) {
+        .transport_context => |transfer| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf1),
+                transfer.destination_address,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The rejected frame must not advance either reassembly or lineage.
+    try std.testing.expectError(
+        error.UnexpectedSequenceNumber,
+        router.pushWithDerivation(
+            0x00,
+            0xf1,
+            try isotp.parse(&wrong_sequence_data),
+        ),
+    );
+
+    const final_result =
+        try router.pushWithDerivation(
+            0x00,
+            0xf1,
+            try isotp.parse(&correct_sequence_data),
+        );
+
+    var completed_lineage: ?Tracker.CompletedLineage =
+        null;
+
+    switch (final_result.derivation) {
+        .transport_payload => |derivation| {
+            try tracker.recordPayload(
+                .{ .index = 103 },
+                derivation,
+            );
+
+            switch (final_result.event) {
+                .completed => |message| {
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &[_]u8{
+                            0xaa, 0xbb, 0xcc,
+                            0xdd, 0xee, 0xff,
+                            0x01, 0x02, 0x03,
+                        },
+                        message.payload,
+                    );
+
+                    completed_lineage =
+                        try tracker.finish(
+                            derivation.transfer,
+                        );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    const lineage =
+        completed_lineage orelse
+        return error.TestUnexpectedResult;
+
+    const contributions =
+        lineage.slice();
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        contributions.len,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 100),
+        contributions[0].frame_occurrence.index,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        contributions[0].message_offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        contributions[0].byte_length,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 103),
+        contributions[1].frame_occurrence.index,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        contributions[1].message_offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        contributions[1].byte_length,
+    );
+}

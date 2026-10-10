@@ -2,176 +2,56 @@ const std = @import("std");
 const Io = std.Io;
 
 const correlation = @import("correlation.zig");
+const can_diagnostic_pipeline = @import("can_diagnostic_pipeline.zig");
 const capture_lineage = @import("capture_lineage.zig");
-const j1939_capture_lineage = @import("j1939_capture_lineage.zig");
-const isotp_capture_lineage = @import("isotp_capture_lineage.zig");
 const evidence_lineage = @import("evidence_lineage.zig");
 const ddec_csv = @import("ddec_csv.zig");
-const isotp = @import("isotp.zig");
 const j1939 = @import("j1939.zig");
 
 // Operational bounds for this whole-file developer CLI.
 // These are not protocol limits.
 const max_capture_bytes = 64 * 1024 * 1024;
-
-const component_sample_capacity = 16;
-// Developer-CLI bound for contributors retained with one component sample.
-// This is not a J1939 protocol limit.
-const component_lineage_capacity = 16;
 const correlation_evidence_capacity = 256;
 const relationship_capacity = 256;
-const lineage_occurrence_capacity = 4;
-const lineage_contribution_capacity = 16;
+const lineage_occurrence_capacity = 256;
+const lineage_contribution_capacity = 4096;
 const session_capacity = 16;
 const payload_capacity = 4095;
 // One payload contribution must supply at least one logical-message byte.
 // Using the payload bound here therefore covers every contributor that can
 // participate in one accepted ISO-TP message without assuming full CAN DLC.
 const isotp_transport_lineage_capacity = payload_capacity;
+const j1939_transport_lineage_capacity = 255;
 
-const ComponentSampleError = error{
-    MissingRawPayload,
-    ComponentPayloadTooLarge,
-    ComponentSampleCapacityExceeded,
-    ComponentLineageCapacityExceeded,
-};
-
-const OwnedComponentSample = struct {
-    source_address: u8 = 0,
-    delivery: j1939.MessageDelivery =
-        .single_frame,
-
-    bytes: [j1939.transport.reassembly.maximum_message_size]u8 =
-        undefined,
-
-    len: usize = 0,
-
-    lineage_contributions: [component_lineage_capacity]capture_lineage.EvidencePayloadContribution =
-        undefined,
-
-    lineage_contribution_count: usize = 0,
-
-    fn fromObservation(
-        component: j1939.ComponentIdentificationObservation,
-    ) ComponentSampleError!OwnedComponentSample {
-        const raw_payload =
-            component.raw_payload orelse
-            return error.MissingRawPayload;
-
-        if (raw_payload.len >
-            j1939.transport.reassembly.maximum_message_size)
-        {
-            return error.ComponentPayloadTooLarge;
-        }
-
-        var result: OwnedComponentSample = .{
-            .source_address = component.source_address,
-            .delivery = component.delivery,
-        };
-
-        @memcpy(
-            result.bytes[0..raw_payload.len],
-            raw_payload,
-        );
-
-        result.len = raw_payload.len;
-
-        return result;
-    }
-
-    fn setLineage(
-        self: *OwnedComponentSample,
-        contributions: []const capture_lineage.EvidencePayloadContribution,
-    ) ComponentSampleError!void {
-        if (contributions.len >
-            self.lineage_contributions.len)
-        {
-            return error.ComponentLineageCapacityExceeded;
-        }
-
-        @memcpy(
-            self.lineage_contributions[0..contributions.len],
-            contributions,
-        );
-
-        self.lineage_contribution_count =
-            contributions.len;
-    }
-
-    fn setMessageLineage(
-        self: *OwnedComponentSample,
-        contributions: []const capture_lineage.MessagePayloadContribution,
-    ) ComponentSampleError!void {
-        if (contributions.len >
-            self.lineage_contributions.len)
-        {
-            return error.ComponentLineageCapacityExceeded;
-        }
-
-        for (contributions, 0..) |contribution, index| {
-            self.lineage_contributions[index] = .{
-                .frame_occurrence = contribution.frame_occurrence,
-                .evidence_offset = contribution.message_offset,
-                .byte_length = contribution.byte_length,
-            };
-        }
-
-        self.lineage_contribution_count =
-            contributions.len;
-    }
-
-    fn lineage(
-        self: *const OwnedComponentSample,
-    ) []const capture_lineage.EvidencePayloadContribution {
-        return self.lineage_contributions[0..self.lineage_contribution_count];
-    }
-
-    fn payload(
-        self: *const OwnedComponentSample,
-    ) []const u8 {
-        return self.bytes[0..self.len];
-    }
-
-    fn observation(
-        self: *const OwnedComponentSample,
-    ) j1939.component_identification.ParseError!j1939.ComponentIdentificationObservation {
-        const raw_payload =
-            self.payload();
-
-        const component =
-            try j1939.component_identification.parse(
-                raw_payload,
-            );
-
-        return .{
-            .source_address = self.source_address,
-            .delivery = self.delivery,
-            .make = component.make,
-            .model = component.model,
-            .serial_number = component.serial_number,
-            .unit_number = component.unit_number,
-            .raw_payload = raw_payload,
-        };
-    }
-};
-
-fn isObserved18DaIdentifier(
-    identifier: u32,
+fn isRecoverablePipelineError(
+    err: anyerror,
 ) bool {
-    return (identifier & 0x1fff0000) ==
-        0x18da0000;
-}
+    return switch (err) {
+        error.InvalidBamDestination,
+        error.InvalidDirectedTransportDestination,
+        error.InvalidLength,
+        error.InvalidSequenceNumber,
+        error.InvalidMessageSize,
+        error.PacketCountMismatch,
+        error.TransferAlreadyActive,
+        error.NoActiveTransfer,
+        error.SourceAddressMismatch,
+        error.UnexpectedSequenceNumber,
+        error.InvalidPacketDataLength,
+        error.EmptyFrame,
+        error.UnsupportedSingleFrameEscapeLength,
+        error.UnsupportedFirstFrameExtendedLength,
+        error.InvalidSingleFrameLength,
+        error.TruncatedSingleFrame,
+        error.TruncatedFirstFrame,
+        error.InvalidFirstFrameLength,
+        error.TruncatedConsecutiveFrame,
+        error.TruncatedFlowControl,
+        error.UnsupportedFrameType,
+        => true,
 
-fn sourceAddress(
-    identifier: u32,
-) u8 {
-    return @truncate(identifier);
-}
-
-fn destinationAddress(
-    identifier: u32,
-) u8 {
-    return @truncate(identifier >> 8);
+        else => false,
+    };
 }
 
 fn appendProjectedEvidenceContribution(
@@ -201,226 +81,21 @@ fn appendProjectedEvidenceContribution(
     count.* += 1;
 }
 
-fn collectJ1939ComponentSamples(
+fn inspectSinglePass(
     text: []const u8,
-    samples: *[component_sample_capacity]OwnedComponentSample,
-    sample_count: *usize,
 ) !void {
-    var assembler =
-        j1939.MessageAssembler(
-            j1939.transport.reassembly.maximum_message_size,
-            4,
-        ){};
-
-    var next_frame_occurrence_index: usize = 0;
-
-    const LineageTracker =
-        j1939_capture_lineage.J1939TransportLineageTracker(
-            4,
-            component_lineage_capacity,
-        );
-
-    var lineage_tracker: LineageTracker = .{};
-
-    var lines =
-        std.mem.splitScalar(
-            u8,
-            text,
-            '\n',
-        );
-
-    while (lines.next()) |line| {
-        const trimmed =
-            std.mem.trim(
-                u8,
-                line,
-                " \t\r",
-            );
-
-        if (trimmed.len == 0) {
-            continue;
-        }
-
-        const parsed =
-            ddec_csv.parseLine(
-                trimmed,
-            ) catch
-                continue;
-
-        const record = switch (parsed) {
-            .non_can => continue,
-            .can => |record| record,
-        };
-
-        const frame_occurrence: capture_lineage.FrameOccurrenceId = .{
-            .index = next_frame_occurrence_index,
-        };
-
-        next_frame_occurrence_index += 1;
-
-        if (record.identifier_format != .extended) {
-            continue;
-        }
-
-        const can_frame =
-            record.frame() catch
-                continue;
-
-        const frame =
-            j1939.FrameView.fromCanFrame(
-                can_frame,
-            ) catch
-                continue;
-
-        var direct_component_contribution: ?capture_lineage.EvidencePayloadContribution = null;
-        var completed_transport_lineage: ?LineageTracker.CompletedLineage = null;
-
-        const assembly_result =
-            assembler.pushFrameWithDerivation(
-                frame,
-            ) catch
-                continue;
-
-        switch (assembly_result.derivation) {
-            .transport_started => |transfer| {
-                try lineage_tracker.start(
-                    transfer,
-                );
-            },
-
-            .transport_payload => |derivation| {
-                try lineage_tracker.recordPayload(
-                    frame_occurrence,
-                    derivation,
-                );
-
-                if (assembly_result.event) |assembly_event| {
-                    switch (assembly_event) {
-                        .message => {
-                            completed_transport_lineage =
-                                try lineage_tracker.finish(
-                                    derivation.transfer,
-                                );
-                        },
-
-                        else => {},
-                    }
-                }
-            },
-
-            .direct_message => |contribution| {
-                if (frame.identifier().pgn ==
-                    j1939.pgn_component_identification)
-                {
-                    direct_component_contribution = .{
-                        .frame_occurrence = frame_occurrence,
-                        .evidence_offset = contribution.offset,
-                        .byte_length = contribution.byte_length,
-                    };
-                }
-            },
-
-            .none,
-            .transport_context,
-            => {},
-        }
-
-        const assembly_event =
-            assembly_result.event orelse
-            continue;
-
-        switch (assembly_event) {
-            .message => |message| {
-                var cursor =
-                    j1939.MessageCursor.init(
-                        message,
-                    ) catch
-                        continue;
-
-                while (true) {
-                    const maybe_event =
-                        cursor.next() catch
-                            break;
-
-                    const event =
-                        maybe_event orelse
-                        break;
-
-                    switch (event) {
-                        .unsupported_pgn => {},
-
-                        .observation => |observation| {
-                            switch (observation) {
-                                .component_identification => |component| {
-                                    if (sample_count.* >=
-                                        samples.len)
-                                    {
-                                        return error.ComponentSampleCapacityExceeded;
-                                    }
-
-                                    var sample =
-                                        try OwnedComponentSample.fromObservation(
-                                            component,
-                                        );
-
-                                    if (direct_component_contribution) |contribution| {
-                                        const direct =
-                                            [_]capture_lineage.EvidencePayloadContribution{
-                                                contribution,
-                                            };
-
-                                        try sample.setLineage(
-                                            &direct,
-                                        );
-                                    } else if (completed_transport_lineage) |lineage| {
-                                        try sample.setMessageLineage(
-                                            lineage.slice(),
-                                        );
-                                    }
-
-                                    samples[sample_count.*] =
-                                        sample;
-
-                                    sample_count.* += 1;
-                                },
-
-                                else => {},
-                            }
-                        },
-                    }
-                }
-            },
-
-            .transport_aborted => |aborted| {
-                if (aborted.transfer) |transfer| {
-                    try lineage_tracker.abort(
-                        transfer,
-                    );
-                }
-            },
-
-            else => {},
-        }
-    }
-}
-
-fn inspectUdsMatches(
-    text: []const u8,
-    samples: *const [component_sample_capacity]OwnedComponentSample,
-    sample_count: usize,
-) !void {
-    var router =
-        isotp.SessionRouter(
+    const CanPipeline =
+        can_diagnostic_pipeline.Pipeline(
+            session_capacity,
             session_capacity,
             payload_capacity,
-        ){};
-
-    var uds_did_responses: usize = 0;
-    var uds_evidence_rejected: usize = 0;
-    var exact_matches: usize = 0;
+            isotp_transport_lineage_capacity,
+        );
 
     const CorrelationEvidence =
-        correlation.OwnedCorrelationEvidence(payload_capacity);
+        correlation.OwnedCorrelationEvidence(
+            payload_capacity,
+        );
 
     const EvidenceInventory =
         correlation.CorrelationEvidenceInventory(
@@ -429,7 +104,9 @@ fn inspectUdsMatches(
         );
 
     const Relationships =
-        correlation.EvidenceRelationshipInventory(relationship_capacity);
+        correlation.EvidenceRelationshipInventory(
+            relationship_capacity,
+        );
 
     const EvidenceOccurrences =
         evidence_lineage.CorrelationEvidenceOccurrenceInventory(
@@ -437,21 +114,17 @@ fn inspectUdsMatches(
             lineage_contribution_capacity,
         );
 
+    var pipeline: CanPipeline = .{};
     var evidence_inventory: EvidenceInventory = .{};
     var relationships: Relationships = .{};
     var evidence_occurrences: EvidenceOccurrences = .{};
-    var j1939_occurrence_recorded: [component_sample_capacity]bool =
-        @splat(false);
+
+    var j1939_component_payloads: usize = 0;
+    var uds_did_responses: usize = 0;
+    var uds_evidence_rejected: usize = 0;
+    var exact_matches: usize = 0;
 
     var next_frame_occurrence_index: usize = 0;
-
-    const LineageTracker =
-        isotp_capture_lineage.IsotpTransportLineageTracker(
-            session_capacity,
-            isotp_transport_lineage_capacity,
-        );
-
-    var lineage_tracker: LineageTracker = .{};
 
     var lines =
         std.mem.splitScalar(
@@ -483,321 +156,342 @@ fn inspectUdsMatches(
             .can => |record| record,
         };
 
-        const frame_occurrence: capture_lineage.FrameOccurrenceId = .{
-            .index = next_frame_occurrence_index,
-        };
+        const frame_occurrence: capture_lineage.FrameOccurrenceId =
+            .{
+                .index = next_frame_occurrence_index,
+            };
 
         next_frame_occurrence_index += 1;
-
-        if (record.identifier_format != .extended) {
-            continue;
-        }
 
         const can_frame =
             record.frame() catch
                 continue;
 
-        const identifier =
-            can_frame.identifier();
-
-        if (!isObserved18DaIdentifier(
-            identifier,
-        )) {
-            continue;
-        }
-
-        const source_address =
-            sourceAddress(identifier);
-
-        const destination_address =
-            destinationAddress(identifier);
-
-        const frame =
-            isotp.parse(
-                can_frame.data(),
-            ) catch
-                continue;
-
-        if (frame == .unsupported) {
-            continue;
-        }
-
-        const push_result =
-            router.pushWithDerivation(
-                source_address,
-                destination_address,
-                frame,
-            ) catch
-                continue;
-
-        const event =
-            push_result.event;
-
-        var completed_transport_lineage: ?LineageTracker.CompletedLineage =
-            null;
-
-        switch (push_result.derivation) {
-            .transport_started => |derivation| {
-                try lineage_tracker.start(
-                    frame_occurrence,
-                    derivation,
-                );
-
-                switch (event) {
-                    .completed => {
-                        completed_transport_lineage =
-                            try lineage_tracker.finish(
-                                derivation.transfer,
-                            );
-                    },
-
-                    else => {},
-                }
-            },
-
-            .transport_payload => |derivation| {
-                try lineage_tracker.recordPayload(
-                    frame_occurrence,
-                    derivation,
-                );
-
-                switch (event) {
-                    .completed => {
-                        completed_transport_lineage =
-                            try lineage_tracker.finish(
-                                derivation.transfer,
-                            );
-                    },
-
-                    else => {},
-                }
-            },
-
-            .none,
-            .direct_message,
-            .transport_context,
-            => {},
-        }
-
-        switch (event) {
-            .in_progress => {},
-
-            .flow_control => {},
-
-            .completed => |message| {
-                const maybe_evidence =
-                    correlation
-                        .fromUdsReadDataByIdentifierResponse(
-                        message,
-                    ) catch {
-                        uds_evidence_rejected += 1;
-                        continue;
-                    };
-
-                const uds_evidence =
-                    maybe_evidence orelse
+        const result =
+            pipeline.push(
+                frame_occurrence,
+                can_frame,
+            ) catch |err| {
+                if (isRecoverablePipelineError(
+                    err,
+                )) {
                     continue;
-
-                uds_did_responses += 1;
-                var f157_occurrence_recorded = false;
-
-                var f157_contributions: [lineage_contribution_capacity]capture_lineage.EvidencePayloadContribution =
-                    undefined;
-
-                var f157_contribution_count: usize = 0;
-
-                const traces_f157 =
-                    message.source_address == 0x00 and
-                    message.destination_address == 0xf1 and
-                    message.delivery == .multi_frame and
-                    uds_evidence.data_identifier == 0xf157;
-
-                if (traces_f157) {
-                    const lineage =
-                        completed_transport_lineage orelse
-                        return error.F157TransportLineageMissing;
-
-                    const evidence_span: correlation.PayloadRange = .{
-                        .offset = 3,
-                        .byte_length = uds_evidence.data_after_identifier.len,
-                    };
-
-                    for (lineage.slice()) |contribution| {
-                        try appendProjectedEvidenceContribution(
-                            &f157_contributions,
-                            &f157_contribution_count,
-                            contribution.frame_occurrence,
-                            .{
-                                .offset = contribution.message_offset,
-                                .byte_length = contribution.byte_length,
-                            },
-                            evidence_span,
-                        );
-                    }
                 }
 
-                for (
-                    samples[0..sample_count],
-                    0..,
-                ) |*sample, sample_index| {
-                    const component =
-                        sample.observation() catch
-                            continue;
+                return err;
+            };
 
-                    const match =
+        if (result.j1939) |pipeline_event| {
+            switch (pipeline_event) {
+                .message => |completed| {
+                    const maybe_cursor: ?j1939.MessageCursor =
+                        j1939.MessageCursor.init(
+                            completed.message,
+                        ) catch null;
+
+                    if (maybe_cursor) |initial_cursor| {
+                        var cursor =
+                            initial_cursor;
+
+                        while (true) {
+                            const maybe_event =
+                                cursor.next() catch
+                                    break;
+
+                            const event =
+                                maybe_event orelse
+                                break;
+
+                            switch (event) {
+                                .unsupported_pgn => {},
+
+                                .observation => |observation| {
+                                    switch (observation) {
+                                        .component_identification => |component| {
+                                            const owned =
+                                                (try CorrelationEvidence
+                                                    .fromJ1939ComponentIdentification(
+                                                    component,
+                                                )) orelse
+                                                continue;
+
+                                            const observed =
+                                                try evidence_inventory.observe(
+                                                    owned,
+                                                );
+
+                                            if (completed.lineage.len >
+                                                j1939_transport_lineage_capacity)
+                                            {
+                                                return error.LineageContributionCapacityExceeded;
+                                            }
+
+                                            var contributions: [j1939_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
+                                                undefined;
+
+                                            for (
+                                                completed.lineage,
+                                                0..,
+                                            ) |contribution, index| {
+                                                contributions[index] = .{
+                                                    .frame_occurrence = contribution.frame_occurrence,
+                                                    .evidence_offset = contribution.message_offset,
+                                                    .byte_length = contribution.byte_length,
+                                                };
+                                            }
+
+                                            const occurrence_id =
+                                                try evidence_occurrences.record(
+                                                    observed.id,
+                                                    contributions[0..completed.lineage.len],
+                                                );
+
+                                            const occurrence =
+                                                evidence_occurrences
+                                                    .occurrence(
+                                                    occurrence_id,
+                                                ) orelse
+                                                return error.RecordedOccurrenceMissing;
+
+                                            std.debug.print(
+                                                "lineage: J1939 FEEB occurrence #{} -> evidence #{} contributors={}\n",
+                                                .{
+                                                    occurrence.id.index,
+                                                    occurrence.value_id.index,
+                                                    occurrence.contributions.len,
+                                                },
+                                            );
+
+                                            for (
+                                                occurrence.contributions,
+                                            ) |contribution| {
+                                                std.debug.print(
+                                                    "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                                    .{
+                                                        contribution.frame_occurrence.index,
+                                                        contribution.evidence_offset,
+                                                        contribution.byte_length,
+                                                    },
+                                                );
+                                            }
+
+                                            j1939_component_payloads += 1;
+                                        },
+
+                                        else => {},
+                                    }
+                                },
+                            }
+                        }
+                    }
+                },
+
+                .transport_aborted,
+                .bam_started,
+                .unsupported_transport_control,
+                => {},
+            }
+        }
+
+        if (result.isotp) |pipeline_event| {
+            switch (pipeline_event) {
+                .message => |completed| {
+                    const maybe_evidence =
                         correlation
-                            .matchJ1939ComponentPayloadToUdsDataIdentifier(
-                            component,
-                            uds_evidence,
-                        ) orelse
-                        continue;
+                            .fromUdsReadDataByIdentifierResponse(
+                            completed.message,
+                        ) catch {
+                            uds_evidence_rejected += 1;
+                            continue;
+                        };
 
-                    const j1939_owned =
-                        (try CorrelationEvidence
-                            .fromJ1939ComponentIdentification(
-                            component,
-                        )) orelse
-                        continue;
+                    if (maybe_evidence) |uds_evidence| {
+                        uds_did_responses += 1;
 
-                    const j1939_result =
-                        try evidence_inventory.observe(
-                            j1939_owned,
-                        );
-
-                    if (!j1939_occurrence_recorded[
-                        sample_index
-                    ]) {
-                        const lineage =
-                            sample.lineage();
-
-                        if (lineage.len == 0) {
-                            return error.J1939ComponentLineageMissing;
-                        }
-
-                        const occurrence_id =
-                            try evidence_occurrences.record(
-                                j1939_result.id,
-                                lineage,
+                        const owned =
+                            try CorrelationEvidence
+                                .fromUdsDataIdentifier(
+                                uds_evidence,
                             );
 
-                        const occurrence =
-                            evidence_occurrences
-                                .occurrence(
-                                occurrence_id,
-                            ) orelse
-                            return error.RecordedOccurrenceMissing;
+                        const observed =
+                            try evidence_inventory.observe(
+                                owned,
+                            );
 
-                        std.debug.print(
-                            "lineage: J1939 FEEB occurrence #{} -> evidence #{} contributors={}\n",
+                        var contributions: [isotp_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
+                            undefined;
+
+                        var contribution_count: usize = 0;
+
+                        const evidence_span: correlation.PayloadRange =
                             .{
-                                occurrence.id.index,
-                                occurrence.value_id.index,
-                                occurrence.contributions.len,
-                            },
-                        );
+                                .offset = 3,
+                                .byte_length = uds_evidence
+                                    .data_after_identifier
+                                    .len,
+                            };
 
                         for (
-                            occurrence.contributions,
+                            completed.lineage,
                         ) |contribution| {
-                            std.debug.print(
-                                "  frame occurrence #{} -> evidence offset={} length={}\n",
+                            try appendProjectedEvidenceContribution(
+                                &contributions,
+                                &contribution_count,
+                                contribution.frame_occurrence,
                                 .{
-                                    contribution.frame_occurrence.index,
-                                    contribution.evidence_offset,
-                                    contribution.byte_length,
+                                    .offset = contribution.message_offset,
+                                    .byte_length = contribution.byte_length,
                                 },
+                                evidence_span,
                             );
                         }
 
-                        j1939_occurrence_recorded[
-                            sample_index
-                        ] = true;
+                        if (contribution_count != 0) {
+                            const occurrence_id =
+                                try evidence_occurrences.record(
+                                    observed.id,
+                                    contributions[0..contribution_count],
+                                );
+
+                            const occurrence =
+                                evidence_occurrences
+                                    .occurrence(
+                                    occurrence_id,
+                                ) orelse
+                                return error.RecordedOccurrenceMissing;
+
+                            if (uds_evidence.data_identifier ==
+                                0xf157)
+                            {
+                                std.debug.print(
+                                    "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
+                                    .{
+                                        occurrence.id.index,
+                                        occurrence.value_id.index,
+                                        occurrence.contributions.len,
+                                    },
+                                );
+                            } else {
+                                std.debug.print(
+                                    "lineage: UDS DID 0x{X:0>4} occurrence #{} -> evidence #{} contributors={}\n",
+                                    .{
+                                        uds_evidence.data_identifier,
+                                        occurrence.id.index,
+                                        occurrence.value_id.index,
+                                        occurrence.contributions.len,
+                                    },
+                                );
+                            }
+
+                            for (
+                                occurrence.contributions,
+                            ) |contribution| {
+                                std.debug.print(
+                                    "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                    .{
+                                        contribution.frame_occurrence.index,
+                                        contribution.evidence_offset,
+                                        contribution.byte_length,
+                                    },
+                                );
+                            }
+                        }
                     }
+                },
 
-                    const uds_owned =
-                        try CorrelationEvidence
-                            .fromUdsDataIdentifier(
-                            uds_evidence,
-                        );
+                .flow_control,
+                .unsupported_frame,
+                => {},
+            }
+        }
+    }
 
-                    const uds_result =
-                        try evidence_inventory.observe(
-                            uds_owned,
-                        );
+    var first_index: usize = 0;
 
-                    if (traces_f157 and
-                        !f157_occurrence_recorded)
-                    {
-                        const occurrence_id =
-                            try evidence_occurrences.record(
-                                uds_result.id,
-                                f157_contributions[0..f157_contribution_count],
-                            );
+    while (first_index <
+        evidence_inventory.count()) : (first_index += 1)
+    {
+        const first_id: correlation.EvidenceValueId =
+            .{ .index = first_index };
 
-                        const occurrence =
-                            evidence_occurrences
-                                .occurrence(
-                                occurrence_id,
-                            ) orelse
-                            return error.RecordedOccurrenceMissing;
+        const first =
+            evidence_inventory.evidence(
+                first_id,
+            ) orelse
+            continue;
 
-                        std.debug.print(
-                            "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
-                            .{
-                                occurrence.id.index,
-                                occurrence.value_id.index,
-                                occurrence.contributions.len,
-                            },
-                        );
+        var second_index =
+            first_index + 1;
 
-                        for (
-                            occurrence.contributions,
-                        ) |contribution| {
+        while (second_index <
+            evidence_inventory.count()) : (second_index += 1)
+        {
+            const second_id: correlation.EvidenceValueId =
+                .{ .index = second_index };
+
+            const second =
+                evidence_inventory.evidence(
+                    second_id,
+                ) orelse
+                continue;
+
+            const relationship =
+                evidence_inventory
+                    .exactPayloadRelationship(
+                    first_id,
+                    second_id,
+                ) orelse
+                continue;
+
+            _ = try relationships.record(
+                relationship,
+            );
+
+            exact_matches +=
+                first.occurrence_count *
+                second.occurrence_count;
+
+            const left =
+                evidence_inventory.evidence(
+                    relationship.left,
+                ) orelse
+                return error.RelationshipEvidenceMissing;
+
+            const right =
+                evidence_inventory.evidence(
+                    relationship.right,
+                ) orelse
+                return error.RelationshipEvidenceMissing;
+
+            switch (left.evidence.*) {
+                .j1939_component_identification_payload => |j1939_value| {
+                    switch (right.evidence.*) {
+                        .uds_data_identifier_response => |uds_value| {
                             std.debug.print(
-                                "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                "match: J1939 SA {X:0>2} {s} <-> UDS {X:0>2}->{X:0>2} DID 0x{X:0>4} {s}: {} bytes\n",
                                 .{
-                                    contribution.frame_occurrence.index,
-                                    contribution.evidence_offset,
-                                    contribution.byte_length,
+                                    j1939_value.source_address,
+                                    @tagName(
+                                        j1939_value.delivery,
+                                    ),
+                                    uds_value.source_address,
+                                    uds_value.destination_address,
+                                    uds_value.data_identifier,
+                                    @tagName(
+                                        uds_value.delivery,
+                                    ),
+                                    relationship.byte_length,
                                 },
                             );
-                        }
-
-                        f157_occurrence_recorded = true;
-                    }
-
-                    const durable_relationship =
-                        evidence_inventory
-                            .exactPayloadRelationship(
-                            j1939_result.id,
-                            uds_result.id,
-                        ) orelse
-                        return error.DurableRelationshipMismatch;
-
-                    _ = try relationships.record(
-                        durable_relationship,
-                    );
-
-                    exact_matches += 1;
-
-                    std.debug.print(
-                        "match: J1939 SA {X:0>2} {s} <-> UDS {X:0>2}->{X:0>2} DID 0x{X:0>4} {s}: {} bytes\n",
-                        .{
-                            match.j1939_source_address,
-                            @tagName(
-                                match.j1939_delivery,
-                            ),
-                            match.uds_source_address,
-                            match.uds_destination_address,
-                            match.data_identifier,
-                            @tagName(
-                                match.uds_delivery,
-                            ),
-                            match.byte_length,
                         },
-                    );
-                }
-            },
+
+                        else => unreachable,
+                    }
+                },
+
+                else => unreachable,
+            }
         }
     }
 
@@ -811,7 +505,7 @@ fn inspectUdsMatches(
         \\
     ,
         .{
-            sample_count,
+            j1939_component_payloads,
             uds_did_responses,
             uds_evidence_rejected,
             exact_matches,
@@ -838,7 +532,9 @@ fn inspectUdsMatches(
             "  relationship #{} reason={s} byte_length={}\n",
             .{
                 relationship_index,
-                @tagName(relationship.reason),
+                @tagName(
+                    relationship.reason,
+                ),
                 relationship.byte_length,
             },
         );
@@ -889,7 +585,9 @@ fn inspectUdsMatches(
                             side.view.id.index,
                             side.view.occurrence_count,
                             value.source_address,
-                            @tagName(value.delivery),
+                            @tagName(
+                                value.delivery,
+                            ),
                         },
                     );
                 },
@@ -904,7 +602,9 @@ fn inspectUdsMatches(
                             value.source_address,
                             value.destination_address,
                             value.data_identifier,
-                            @tagName(value.delivery),
+                            @tagName(
+                                value.delivery,
+                            ),
                         },
                     );
                 },
@@ -941,20 +641,5 @@ pub fn main(
             .limited(max_capture_bytes),
         );
 
-    var component_samples: [component_sample_capacity]OwnedComponentSample =
-        undefined;
-
-    var component_sample_count: usize = 0;
-
-    try collectJ1939ComponentSamples(
-        text,
-        &component_samples,
-        &component_sample_count,
-    );
-
-    try inspectUdsMatches(
-        text,
-        &component_samples,
-        component_sample_count,
-    );
+    try inspectSinglePass(text);
 }

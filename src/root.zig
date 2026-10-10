@@ -17,6 +17,7 @@ pub const evidence_lineage = @import("evidence_lineage.zig");
 pub const capture_text = @import("capture_text.zig");
 pub const capture_audit = @import("capture_audit.zig");
 pub const capture_pipeline = @import("capture_pipeline.zig");
+pub const can_diagnostic_pipeline = @import("can_diagnostic_pipeline.zig");
 
 test {
     _ = can;
@@ -38,6 +39,7 @@ test {
     _ = capture_text;
     _ = capture_audit;
     _ = capture_pipeline;
+    _ = can_diagnostic_pipeline;
 }
 
 test "authentic DDEC diagnostic traffic reaches ISO-TP parser" {
