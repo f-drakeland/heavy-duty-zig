@@ -138,6 +138,7 @@ pub const TransportAborted = struct {
     destination_address: u8,
     reason: u8,
     target_pgn: u32,
+    transfer: ?TransportTransfer,
     matched_active_session: bool,
     data: []const u8,
 };
@@ -506,8 +507,19 @@ pub fn MessageAssembler(
                             abort.target_pgn,
                         );
 
+                    const aborted_transfer: ?TransportTransfer =
+                        if (session) |active_session|
+                            .{
+                                .source_address = active_session.source_address,
+                                .destination_address = active_session.destination_address,
+                                .target_pgn = active_session.target_pgn,
+                                .delivery = active_session.delivery,
+                            }
+                        else
+                            null;
+
                     const matched_active_session =
-                        session != null;
+                        aborted_transfer != null;
 
                     if (session) |active_session| {
                         active_session.reassembler.reset();
@@ -525,6 +537,7 @@ pub fn MessageAssembler(
                                 .destination_address = destination_address,
                                 .reason = abort.reason,
                                 .target_pgn = abort.target_pgn,
+                                .transfer = aborted_transfer,
                                 .matched_active_session = matched_active_session,
                                 .data = frame.data(),
                             },
@@ -2742,6 +2755,30 @@ test "message assembler releases incomplete RTS CTS session on abort" {
                 aborted.target_pgn,
             );
 
+            const transfer =
+                aborted.transfer orelse
+                return error.TestUnexpectedResult;
+
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf9),
+                transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, 0x00feeb),
+                transfer.target_pgn,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.rts_cts,
+                transfer.delivery,
+            );
+
             try std.testing.expect(
                 aborted.matched_active_session,
             );
@@ -3039,6 +3076,10 @@ test "message assembler reconstructs authentic RTS CTS component identification 
             try std.testing.expectEqual(
                 @as(u32, 0x00feeb),
                 aborted.target_pgn,
+            );
+
+            try std.testing.expect(
+                aborted.transfer == null,
             );
 
             try std.testing.expect(
