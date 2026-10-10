@@ -4,6 +4,7 @@ pub const reassembly = @import("transport_reassembly.zig");
 
 pub const abort_control: u8 = 0xff;
 pub const rts_control: u8 = 0x10;
+pub const cts_control: u8 = 0x11;
 pub const bam_control: u8 = 0x20;
 pub const frame_data_length: usize = 8;
 
@@ -25,6 +26,13 @@ pub const RequestToSend = struct {
     target_pgn: u32,
 };
 
+pub const ClearToSend = struct {
+    packets_allowed: u8,
+    next_packet_number: u8,
+    reserved: [2]u8,
+    target_pgn: u32,
+};
+
 pub const BamAnnouncement = struct {
     total_message_size: u16,
     packet_count: u8,
@@ -40,6 +48,7 @@ pub const UnsupportedConnectionManagement = struct {
 pub const ConnectionManagement = union(enum) {
     abort: ConnectionAbort,
     rts: RequestToSend,
+    cts: ClearToSend,
     bam: BamAnnouncement,
     unsupported: UnsupportedConnectionManagement,
 };
@@ -85,6 +94,18 @@ pub fn parseConnectionManagementData(
                 .total_message_size = total_message_size,
                 .packet_count = data[3],
                 .max_packets_per_cts = data[4],
+                .target_pgn = target_pgn,
+            },
+        },
+
+        cts_control => .{
+            .cts = .{
+                .packets_allowed = data[1],
+                .next_packet_number = data[2],
+                .reserved = .{
+                    data[3],
+                    data[4],
+                },
                 .target_pgn = target_pgn,
             },
         },
@@ -252,9 +273,52 @@ test "parses authentic RTS connection-management data" {
     }
 }
 
-test "unsupported connection-management control remains visible" {
+test "parses authentic CTS connection-management data" {
     const data = [_]u8{
         0x11,
+        0x05,
+        0x01,
+        0xff,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const result =
+        try parseConnectionManagementData(&data);
+
+    switch (result) {
+        .cts => |cts| {
+            try std.testing.expectEqual(
+                @as(u8, 5),
+                cts.packets_allowed,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 1),
+                cts.next_packet_number,
+            );
+
+            try std.testing.expectEqualSlices(
+                u8,
+                &[_]u8{ 0xff, 0xff },
+                &cts.reserved,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, 0x00feeb),
+                cts.target_pgn,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "unsupported connection-management control remains visible" {
+    const data = [_]u8{
+        0x7f,
         0,
         0,
         0,
@@ -270,7 +334,7 @@ test "unsupported connection-management control remains visible" {
     switch (result) {
         .unsupported => |unsupported| {
             try std.testing.expectEqual(
-                @as(u8, 0x11),
+                @as(u8, 0x7f),
                 unsupported.control,
             );
 

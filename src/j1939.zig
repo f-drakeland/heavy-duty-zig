@@ -123,6 +123,7 @@ pub const MessageAssemblyDerivation = union(enum) {
     direct_message: PayloadContribution,
     transport_started: TransportTransfer,
     transport_payload: TransportPayloadDerivation,
+    transport_context: TransportTransfer,
 };
 
 pub const BamStarted = struct {
@@ -570,6 +571,51 @@ pub fn MessageAssembler(
                                 .delivery = .rts_cts,
                             },
                         },
+                    };
+                },
+
+                .cts => |cts| {
+                    const derivation: MessageAssemblyDerivation =
+                        blk: {
+                            const destination_address =
+                                identifier.destination_address orelse
+                                break :blk .none;
+
+                            const session =
+                                self.findSession(
+                                    destination_address,
+                                    identifier.source_address,
+                                ) orelse
+                                break :blk .none;
+
+                            if (session.delivery != .rts_cts) {
+                                break :blk .none;
+                            }
+
+                            if (session.target_pgn != cts.target_pgn) {
+                                break :blk .none;
+                            }
+
+                            break :blk .{
+                                .transport_context = .{
+                                    .source_address = session.source_address,
+                                    .destination_address = session.destination_address,
+                                    .target_pgn = session.target_pgn,
+                                    .delivery = session.delivery,
+                                },
+                            };
+                        };
+
+                    return .{
+                        .event = .{
+                            .unsupported_transport_control = .{
+                                .source_address = identifier.source_address,
+                                .destination_address = identifier.destination_address,
+                                .control = transport.cts_control,
+                                .data = frame.data(),
+                            },
+                        },
+                        .derivation = derivation,
                     };
                 },
 
@@ -1939,6 +1985,104 @@ test "message assembler reports RTS CTS transfer start derivation" {
 
     switch (result.derivation) {
         .transport_started => |transfer| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf9),
+                transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, pgn_component_identification),
+                transfer.target_pgn,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.rts_cts,
+                transfer.delivery,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "message assembler reports CTS as transport context" {
+    const rts_data = [_]u8{
+        0x10,
+        0x21,
+        0x00,
+        0x05,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const cts_data = [_]u8{
+        0x11,
+        0x05,
+        0x01,
+        0xff,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const rts_can_frame = try can.FrameView.fromParts(
+        0x1cecf900,
+        .extended,
+        .data,
+        8,
+        &rts_data,
+    );
+
+    const cts_can_frame = try can.FrameView.fromParts(
+        0x1cec00f9,
+        .extended,
+        .data,
+        8,
+        &cts_data,
+    );
+
+    const rts_frame =
+        try FrameView.fromCanFrame(rts_can_frame);
+
+    const cts_frame =
+        try FrameView.fromCanFrame(cts_can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    _ = try assembler.pushFrameWithDerivation(
+        rts_frame,
+    );
+
+    const result =
+        try assembler.pushFrameWithDerivation(
+            cts_frame,
+        );
+
+    const event =
+        result.event orelse
+        return error.TestUnexpectedResult;
+
+    switch (event) {
+        .unsupported_transport_control => |unsupported| {
+            try std.testing.expectEqual(
+                transport.cts_control,
+                unsupported.control,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (result.derivation) {
+        .transport_context => |transfer| {
             try std.testing.expectEqual(
                 @as(u8, 0x00),
                 transfer.source_address,
