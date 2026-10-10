@@ -116,6 +116,9 @@ pub fn main(init: std.process.Init) !void {
     var endpoints =
         correlation.EndpointInventory(256){};
 
+    var diagnostics =
+        correlation.DiagnosticEvidenceInventory(1024){};
+
     var identities =
         correlation.IdentityEvidenceInventory(
             1024,
@@ -270,6 +273,16 @@ pub fn main(init: std.process.Init) !void {
                                 return;
                             };
 
+                            _ = diagnostics.observe(
+                                endpoint_observation,
+                            ) catch |err| {
+                                std.debug.print(
+                                    "diagnostic inventory error: {s}\n",
+                                    .{@errorName(err)},
+                                );
+                                return;
+                            };
+
                             _ = identities.observe(
                                 endpoint_observation,
                             ) catch |err| {
@@ -316,6 +329,7 @@ pub fn main(init: std.process.Init) !void {
         \\unsupported PGN messages: {}
         \\capture-local endpoints: {}
         \\distinct identity evidence: {}
+        \\distinct diagnostic evidence: {}
         \\
     ,
         .{
@@ -333,8 +347,58 @@ pub fn main(init: std.process.Init) !void {
             unsupported_pgn_messages,
             view.count(),
             identities.count(),
+            diagnostics.count(),
         },
     );
+
+    var diagnostic_index: usize = 0;
+
+    while (diagnostics.evidenceAt(diagnostic_index)) |stored| : (diagnostic_index += 1) {
+        switch (stored.evidence.*) {
+            .j1587_diagnostic_code => |value| {
+                std.debug.print(
+                    "diagnostic evidence #{} capture observations={}: J1587 MID {X:0>2} diagnostic code {any}\n",
+                    .{
+                        diagnostic_index,
+                        stored.capture_observation_count,
+                        value.source_mid,
+                        value,
+                    },
+                );
+            },
+
+            .j1939_dm1_lamps => |value| {
+                std.debug.print(
+                    "diagnostic evidence #{} capture observations={}: J1939 SA {X:0>2} DM1 lamps delivery={s} statuses={any} flashes={any}\n",
+                    .{
+                        diagnostic_index,
+                        stored.capture_observation_count,
+                        value.source_address,
+                        @tagName(value.delivery),
+                        value.statuses,
+                        value.flashes,
+                    },
+                );
+            },
+
+            .j1939_dm1_diagnostic_trouble_code => |value| {
+                std.debug.print(
+                    "diagnostic evidence #{} capture observations={}: J1939 SA {X:0>2} DM1 DTC delivery={s} trouble_code={any}\n",
+                    .{
+                        diagnostic_index,
+                        stored.capture_observation_count,
+                        value.source_address,
+                        @tagName(value.delivery),
+                        value.trouble_code,
+                    },
+                );
+            },
+        }
+    }
+
+    if (diagnostics.count() != 0) {
+        std.debug.print("\n", .{});
+    }
 
     var endpoint_index: usize = 0;
 
