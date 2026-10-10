@@ -435,6 +435,99 @@ fn inspectUdsMatches(
             relationships.count(),
         },
     );
+
+    if (relationships.count() != 0) {
+        std.debug.print(
+            "\ncapture-level evidence relationships:\n",
+            .{},
+        );
+    }
+
+    var relationship_index: usize = 0;
+
+    while (relationships.relationshipAt(
+        relationship_index,
+    )) |stored_relationship| : (relationship_index += 1) {
+        const relationship =
+            stored_relationship.relationship.*;
+
+        std.debug.print(
+            "  relationship #{} reason={s} byte_length={}\n",
+            .{
+                relationship_index,
+                @tagName(relationship.reason),
+                relationship.byte_length,
+            },
+        );
+
+        const left =
+            evidence_inventory.evidence(
+                relationship.left,
+            ) orelse {
+                std.debug.print(
+                    "    left evidence could not be resolved\n",
+                    .{},
+                );
+                continue;
+            };
+
+        const right =
+            evidence_inventory.evidence(
+                relationship.right,
+            ) orelse {
+                std.debug.print(
+                    "    right evidence could not be resolved\n",
+                    .{},
+                );
+                continue;
+            };
+
+        const Sides = [_]struct {
+            label: []const u8,
+            view: EvidenceInventory.EvidenceView,
+        }{
+            .{
+                .label = "left",
+                .view = left,
+            },
+            .{
+                .label = "right",
+                .view = right,
+            },
+        };
+
+        for (Sides) |side| {
+            switch (side.view.evidence.*) {
+                .j1939_component_identification_payload => |value| {
+                    std.debug.print(
+                        "    {s} evidence #{} occurrences={}: J1939 SA {X:0>2} {s} component-identification payload\n",
+                        .{
+                            side.label,
+                            side.view.id.index,
+                            side.view.occurrence_count,
+                            value.source_address,
+                            @tagName(value.delivery),
+                        },
+                    );
+                },
+
+                .uds_data_identifier_response => |value| {
+                    std.debug.print(
+                        "    {s} evidence #{} occurrences={}: UDS {X:0>2}->{X:0>2} DID 0x{X:0>4} {s} response data\n",
+                        .{
+                            side.label,
+                            side.view.id.index,
+                            side.view.occurrence_count,
+                            value.source_address,
+                            value.destination_address,
+                            value.data_identifier,
+                            @tagName(value.delivery),
+                        },
+                    );
+                },
+            }
+        }
+    }
 }
 
 pub fn main(
