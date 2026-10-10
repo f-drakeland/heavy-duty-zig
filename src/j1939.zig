@@ -477,6 +477,167 @@ pub fn MessageAssembler(
             return null;
         }
 
+        fn pushTransportConnectionManagement(
+            self: *Self,
+            frame: FrameView,
+        ) MessageAssemblyError!MessageAssemblyResult {
+            const identifier = frame.identifier();
+
+            const connection_management =
+                try transport.parseConnectionManagementData(
+                    frame.data(),
+                );
+
+            switch (connection_management) {
+                .abort => |abort| {
+                    const destination_address =
+                        identifier.destination_address orelse
+                        return error.InvalidDirectedTransportDestination;
+
+                    if (destination_address == 0xff) {
+                        return error.InvalidDirectedTransportDestination;
+                    }
+
+                    const session =
+                        self.findRtsCtsSessionForAbort(
+                            identifier.source_address,
+                            destination_address,
+                            abort.target_pgn,
+                        );
+
+                    const matched_active_session =
+                        session != null;
+
+                    if (session) |active_session| {
+                        active_session.reassembler.reset();
+                        active_session.occupied = false;
+                        active_session.source_address = 0;
+                        active_session.destination_address = 0;
+                        active_session.target_pgn = 0;
+                        active_session.delivery = .bam;
+                    }
+
+                    return .{
+                        .event = .{
+                            .transport_aborted = .{
+                                .source_address = identifier.source_address,
+                                .destination_address = destination_address,
+                                .reason = abort.reason,
+                                .target_pgn = abort.target_pgn,
+                                .matched_active_session = matched_active_session,
+                                .data = frame.data(),
+                            },
+                        },
+                        .derivation = .none,
+                    };
+                },
+
+                .rts => |rts| {
+                    const destination_address =
+                        identifier.destination_address orelse
+                        return error.NoActiveTransfer;
+
+                    const session =
+                        self.findSession(
+                            identifier.source_address,
+                            destination_address,
+                        ) orelse
+                        self.findFreeSession() orelse
+                        return error.SessionCapacityExceeded;
+
+                    try session.reassembler.startTransfer(
+                        identifier.source_address,
+                        rts.total_message_size,
+                        rts.packet_count,
+                        rts.target_pgn,
+                    );
+
+                    session.occupied = true;
+                    session.source_address =
+                        identifier.source_address;
+                    session.destination_address =
+                        destination_address;
+                    session.target_pgn = rts.target_pgn;
+                    session.delivery = .rts_cts;
+
+                    return .{
+                        .event = null,
+                        .derivation = .{
+                            .transport_started = .{
+                                .source_address = identifier.source_address,
+                                .destination_address = destination_address,
+                                .target_pgn = rts.target_pgn,
+                                .delivery = .rts_cts,
+                            },
+                        },
+                    };
+                },
+
+                .bam => |bam| {
+                    if (identifier.destination_address !=
+                        @as(?u8, 0xff))
+                    {
+                        return error.InvalidBamDestination;
+                    }
+
+                    const session =
+                        self.findSession(
+                            identifier.source_address,
+                            0xff,
+                        ) orelse
+                        self.findFreeSession() orelse
+                        return error.SessionCapacityExceeded;
+
+                    try session.reassembler.startBam(
+                        identifier.source_address,
+                        bam.total_message_size,
+                        bam.packet_count,
+                        bam.target_pgn,
+                    );
+
+                    session.occupied = true;
+                    session.source_address =
+                        identifier.source_address;
+                    session.destination_address = 0xff;
+                    session.target_pgn = bam.target_pgn;
+                    session.delivery = .bam;
+
+                    return .{
+                        .event = .{
+                            .bam_started = .{
+                                .source_address = identifier.source_address,
+                                .target_pgn = bam.target_pgn,
+                                .total_message_size = bam.total_message_size,
+                                .packet_count = bam.packet_count,
+                            },
+                        },
+                        .derivation = .{
+                            .transport_started = .{
+                                .source_address = identifier.source_address,
+                                .destination_address = 0xff,
+                                .target_pgn = bam.target_pgn,
+                                .delivery = .bam,
+                            },
+                        },
+                    };
+                },
+
+                .unsupported => |unsupported| {
+                    return .{
+                        .event = .{
+                            .unsupported_transport_control = .{
+                                .source_address = identifier.source_address,
+                                .destination_address = identifier.destination_address,
+                                .control = unsupported.control,
+                                .data = unsupported.data,
+                            },
+                        },
+                        .derivation = .none,
+                    };
+                },
+            }
+        }
+
         fn pushTransportDataTransfer(
             self: *Self,
             frame: FrameView,
@@ -556,6 +717,12 @@ pub fn MessageAssembler(
                 frame.pgnClassification();
 
             switch (classification) {
+                .transport_connection_management => {
+                    return try self.pushTransportConnectionManagement(
+                        frame,
+                    );
+                },
+
                 .transport_data_transfer => {
                     return try self.pushTransportDataTransfer(
                         frame,
@@ -568,40 +735,14 @@ pub fn MessageAssembler(
             const event =
                 try self.pushFrame(frame);
 
-            const derivation: MessageAssemblyDerivation =
-                switch (classification) {
-                    .transport_connection_management => blk: {
-                        const assembly_event =
-                            event orelse
-                            break :blk .none;
-
-                        break :blk switch (assembly_event) {
-                            .bam_started => |started| .{
-                                .transport_started = .{
-                                    .source_address = started.source_address,
-                                    .destination_address = 0xff,
-                                    .target_pgn = started.target_pgn,
-                                    .delivery = .bam,
-                                },
-                            },
-
-                            else => .none,
-                        };
-                    },
-
-                    .transport_data_transfer => unreachable,
-
-                    else => .{
-                        .direct_message = .{
-                            .offset = 0,
-                            .byte_length = frame.data().len,
-                        },
-                    },
-                };
-
             return .{
                 .event = event,
-                .derivation = derivation,
+                .derivation = .{
+                    .direct_message = .{
+                        .offset = 0,
+                        .byte_length = frame.data().len,
+                    },
+                },
             };
         }
 
@@ -609,134 +750,11 @@ pub fn MessageAssembler(
             self: *Self,
             frame: FrameView,
         ) MessageAssemblyError!?MessageAssemblyEvent {
-            const identifier = frame.identifier();
-
             switch (frame.pgnClassification()) {
                 .transport_connection_management => {
-                    const connection_management =
-                        try transport.parseConnectionManagementData(
-                            frame.data(),
-                        );
-
-                    switch (connection_management) {
-                        .abort => |abort| {
-                            const destination_address =
-                                identifier.destination_address orelse
-                                return error.InvalidDirectedTransportDestination;
-
-                            if (destination_address == 0xff) {
-                                return error.InvalidDirectedTransportDestination;
-                            }
-
-                            const session =
-                                self.findRtsCtsSessionForAbort(
-                                    identifier.source_address,
-                                    destination_address,
-                                    abort.target_pgn,
-                                );
-
-                            const matched_active_session =
-                                session != null;
-
-                            if (session) |active_session| {
-                                active_session.reassembler.reset();
-                                active_session.occupied = false;
-                                active_session.source_address = 0;
-                                active_session.destination_address = 0;
-                                active_session.target_pgn = 0;
-                                active_session.delivery = .bam;
-                            }
-
-                            return .{
-                                .transport_aborted = .{
-                                    .source_address = identifier.source_address,
-                                    .destination_address = destination_address,
-                                    .reason = abort.reason,
-                                    .target_pgn = abort.target_pgn,
-                                    .matched_active_session = matched_active_session,
-                                    .data = frame.data(),
-                                },
-                            };
-                        },
-
-                        .rts => |rts| {
-                            const destination_address =
-                                identifier.destination_address orelse
-                                return error.NoActiveTransfer;
-
-                            const session =
-                                self.findSession(
-                                    identifier.source_address,
-                                    destination_address,
-                                ) orelse
-                                self.findFreeSession() orelse
-                                return error.SessionCapacityExceeded;
-
-                            try session.reassembler.startTransfer(
-                                identifier.source_address,
-                                rts.total_message_size,
-                                rts.packet_count,
-                                rts.target_pgn,
-                            );
-
-                            session.occupied = true;
-                            session.source_address =
-                                identifier.source_address;
-                            session.destination_address =
-                                destination_address;
-                            session.target_pgn = rts.target_pgn;
-                            session.delivery = .rts_cts;
-
-                            return null;
-                        },
-                        .bam => |bam| {
-                            if (identifier.destination_address != @as(?u8, 0xff)) {
-                                return error.InvalidBamDestination;
-                            }
-
-                            const session =
-                                self.findSession(
-                                    identifier.source_address,
-                                    0xff,
-                                ) orelse
-                                self.findFreeSession() orelse
-                                return error.SessionCapacityExceeded;
-
-                            try session.reassembler.startBam(
-                                identifier.source_address,
-                                bam.total_message_size,
-                                bam.packet_count,
-                                bam.target_pgn,
-                            );
-
-                            session.occupied = true;
-                            session.source_address =
-                                identifier.source_address;
-                            session.destination_address = 0xff;
-                            session.target_pgn = bam.target_pgn;
-                            session.delivery = .bam;
-
-                            return .{
-                                .bam_started = .{
-                                    .source_address = identifier.source_address,
-                                    .target_pgn = bam.target_pgn,
-                                    .total_message_size = bam.total_message_size,
-                                    .packet_count = bam.packet_count,
-                                },
-                            };
-                        },
-
-                        .unsupported => |unsupported| {
-                            return .{
-                                .unsupported_transport_control = .{
-                                    .source_address = identifier.source_address,
-                                    .destination_address = identifier.destination_address,
-                                    .control = unsupported.control,
-                                    .data = unsupported.data,
-                                },
-                            };
-                        },
-                    }
+                    return (try self.pushTransportConnectionManagement(
+                        frame,
+                    )).event;
                 },
 
                 .transport_data_transfer => {
@@ -1877,6 +1895,67 @@ test "message assembler reports BAM transfer start derivation" {
 
             try std.testing.expectEqual(
                 MessageDelivery.bam,
+                transfer.delivery,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "message assembler reports RTS CTS transfer start derivation" {
+    const rts_data = [_]u8{
+        0x10,
+        0x21,
+        0x00,
+        0x05,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const can_frame = try can.FrameView.fromParts(
+        0x1cecf900,
+        .extended,
+        .data,
+        8,
+        &rts_data,
+    );
+
+    const frame =
+        try FrameView.fromCanFrame(can_frame);
+
+    var assembler = MessageAssembler(64, 4){};
+
+    const result =
+        try assembler.pushFrameWithDerivation(
+            frame,
+        );
+
+    try std.testing.expect(
+        result.event == null,
+    );
+
+    switch (result.derivation) {
+        .transport_started => |transfer| {
+            try std.testing.expectEqual(
+                @as(u8, 0x00),
+                transfer.source_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u8, 0xf9),
+                transfer.destination_address,
+            );
+
+            try std.testing.expectEqual(
+                @as(u32, pgn_component_identification),
+                transfer.target_pgn,
+            );
+
+            try std.testing.expectEqual(
+                MessageDelivery.rts_cts,
                 transfer.delivery,
             );
         },
