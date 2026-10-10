@@ -173,6 +173,16 @@ pub const MessageDelivery = enum {
     multi_frame,
 };
 
+pub const PayloadContribution = struct {
+    offset: usize,
+    byte_length: usize,
+};
+
+pub const ReassemblyPushResult = struct {
+    contribution: ?PayloadContribution,
+    completed: ?CompletedMessage,
+};
+
 pub const CompletedMessage = struct {
     payload: []const u8,
     delivery: MessageDelivery,
@@ -222,6 +232,15 @@ pub fn Reassembler(
             self: *Self,
             frame: Frame,
         ) ReassemblyError!?CompletedMessage {
+            return (try self.pushWithContribution(
+                frame,
+            )).completed;
+        }
+
+        pub fn pushWithContribution(
+            self: *Self,
+            frame: Frame,
+        ) ReassemblyError!ReassemblyPushResult {
             switch (frame) {
                 .single_frame => |single| {
                     if (self.active) {
@@ -229,8 +248,14 @@ pub fn Reassembler(
                     }
 
                     return .{
-                        .payload = single.payload,
-                        .delivery = .single_frame,
+                        .contribution = .{
+                            .offset = 0,
+                            .byte_length = single.payload.len,
+                        },
+                        .completed = .{
+                            .payload = single.payload,
+                            .delivery = .single_frame,
+                        },
                     };
                 },
 
@@ -252,6 +277,12 @@ pub fn Reassembler(
                             first.data.len,
                         );
 
+                    const contribution =
+                        PayloadContribution{
+                            .offset = 0,
+                            .byte_length = copy_length,
+                        };
+
                     std.mem.copyForwards(
                         u8,
                         self.buffer[0..copy_length],
@@ -269,12 +300,18 @@ pub fn Reassembler(
                         self.active = false;
 
                         return .{
-                            .payload = self.buffer[0..self.message_length],
-                            .delivery = .multi_frame,
+                            .contribution = contribution,
+                            .completed = .{
+                                .payload = self.buffer[0..self.message_length],
+                                .delivery = .multi_frame,
+                            },
                         };
                     }
 
-                    return null;
+                    return .{
+                        .contribution = contribution,
+                        .completed = null,
+                    };
                 },
 
                 .consecutive_frame => |consecutive| {
@@ -298,6 +335,12 @@ pub fn Reassembler(
                             consecutive.data.len,
                         );
 
+                    const contribution =
+                        PayloadContribution{
+                            .offset = self.bytes_written,
+                            .byte_length = copy_length,
+                        };
+
                     std.mem.copyForwards(
                         u8,
                         self.buffer[self.bytes_written .. self.bytes_written +
@@ -313,8 +356,11 @@ pub fn Reassembler(
                         self.active = false;
 
                         return .{
-                            .payload = self.buffer[0..self.message_length],
-                            .delivery = .multi_frame,
+                            .contribution = contribution,
+                            .completed = .{
+                                .payload = self.buffer[0..self.message_length],
+                                .delivery = .multi_frame,
+                            },
                         };
                     }
 
@@ -322,11 +368,17 @@ pub fn Reassembler(
                         (self.next_sequence_number + 1) &
                         0x0f;
 
-                    return null;
+                    return .{
+                        .contribution = contribution,
+                        .completed = null,
+                    };
                 },
 
                 .flow_control => {
-                    return null;
+                    return .{
+                        .contribution = null,
+                        .completed = null,
+                    };
                 },
 
                 .unsupported => {
@@ -826,6 +878,143 @@ test "reassembles authentic DDEC ISO-TP response" {
         (try reassembler.push(
             try parse(&consecutive_3_data),
         )).?;
+
+    try std.testing.expectEqual(
+        MessageDelivery.multi_frame,
+        completed.delivery,
+    );
+
+    const expected = [_]u8{
+        0x62, 0xf1, 0x95, 0x00,
+        0x02, 0x56, 0x00, 0x01,
+        0x52, 0x15, 0x00, 0x00,
+        0x61, 0x0a, 0x01, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+        0x00, 0x00,
+    };
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected,
+        completed.payload,
+    );
+}
+
+test "reports authentic ISO-TP payload contributions" {
+    const first_data = [_]u8{
+        0x10, 0x16, 0x62, 0xf1,
+        0x95, 0x00, 0x02, 0x56,
+    };
+
+    const consecutive_1_data = [_]u8{
+        0x21, 0x00, 0x01, 0x52,
+        0x15, 0x00, 0x00, 0x61,
+    };
+
+    const consecutive_2_data = [_]u8{
+        0x22, 0x0a, 0x01, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+    };
+
+    const consecutive_3_data = [_]u8{
+        0x23, 0x00, 0x00, 0x0a,
+        0x03, 0x0a, 0x0c, 0x00,
+    };
+
+    var reassembler =
+        Reassembler(64){};
+
+    const first_result =
+        try reassembler.pushWithContribution(
+            try parse(&first_data),
+        );
+
+    const first_contribution =
+        first_result.contribution orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        first_contribution.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        first_contribution.byte_length,
+    );
+
+    try std.testing.expect(
+        first_result.completed == null,
+    );
+
+    const consecutive_1_result =
+        try reassembler.pushWithContribution(
+            try parse(&consecutive_1_data),
+        );
+
+    const consecutive_1_contribution =
+        consecutive_1_result.contribution orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        consecutive_1_contribution.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        consecutive_1_contribution.byte_length,
+    );
+
+    try std.testing.expect(
+        consecutive_1_result.completed == null,
+    );
+
+    const consecutive_2_result =
+        try reassembler.pushWithContribution(
+            try parse(&consecutive_2_data),
+        );
+
+    const consecutive_2_contribution =
+        consecutive_2_result.contribution orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 13),
+        consecutive_2_contribution.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        consecutive_2_contribution.byte_length,
+    );
+
+    try std.testing.expect(
+        consecutive_2_result.completed == null,
+    );
+
+    const consecutive_3_result =
+        try reassembler.pushWithContribution(
+            try parse(&consecutive_3_data),
+        );
+
+    const consecutive_3_contribution =
+        consecutive_3_result.contribution orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 20),
+        consecutive_3_contribution.offset,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        consecutive_3_contribution.byte_length,
+    );
+
+    const completed =
+        consecutive_3_result.completed orelse
+        return error.TestUnexpectedResult;
 
     try std.testing.expectEqual(
         MessageDelivery.multi_frame,
