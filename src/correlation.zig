@@ -136,6 +136,189 @@ pub const OwnedDiagnosticEvidence = union(enum) {
     }
 };
 
+pub const DiagnosticObserveResult = enum {
+    non_diagnostic,
+    new_evidence,
+    existing_evidence,
+};
+
+pub const DiagnosticInventoryError = error{
+    DiagnosticEvidenceCapacityExceeded,
+};
+
+/// Bounded capture-local inventory of distinct diagnostic evidence.
+///
+/// Exact repeated evidence increments `capture_observation_count`. That count
+/// records how many times HDZ observed the exact evidence value in this
+/// capture; it is distinct from any protocol-reported fault occurrence count.
+///
+/// Diagnostic evidence remains protocol-specific and associated with the
+/// endpoint from which it was observed. This inventory does not establish
+/// permanent controller or physical ECU identity.
+pub fn DiagnosticEvidenceInventory(
+    comptime evidence_capacity: usize,
+) type {
+    if (evidence_capacity == 0) {
+        @compileError(
+            "diagnostic evidence capacity must be greater than zero",
+        );
+    }
+
+    const Owned = OwnedDiagnosticEvidence;
+
+    return struct {
+        const Self = @This();
+
+        pub const EvidenceView = struct {
+            evidence: *const Owned,
+            capture_observation_count: usize,
+        };
+
+        const Slot = struct {
+            occupied: bool = false,
+            evidence: Owned = undefined,
+            capture_observation_count: usize = 0,
+        };
+
+        slots: [evidence_capacity]Slot = @splat(.{}),
+        evidence_count: usize = 0,
+
+        pub fn observe(
+            self: *Self,
+            observation: EndpointObservation,
+        ) DiagnosticInventoryError!DiagnosticObserveResult {
+            const owned =
+                Owned.fromEndpointObservation(
+                    observation,
+                ) orelse
+                return .non_diagnostic;
+
+            if (self.findExact(&owned)) |slot| {
+                slot.capture_observation_count += 1;
+
+                return .existing_evidence;
+            }
+
+            const slot =
+                self.findFreeSlot() orelse
+                return error.DiagnosticEvidenceCapacityExceeded;
+
+            slot.* = .{
+                .occupied = true,
+                .evidence = owned,
+                .capture_observation_count = 1,
+            };
+
+            self.evidence_count += 1;
+
+            return .new_evidence;
+        }
+
+        pub fn count(
+            self: *const Self,
+        ) usize {
+            return self.evidence_count;
+        }
+
+        pub fn evidenceCountForEndpoint(
+            self: *const Self,
+            key: EndpointKey,
+        ) usize {
+            var count_for_endpoint: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (slot.evidence.endpoint().eql(key)) {
+                    count_for_endpoint += 1;
+                }
+            }
+
+            return count_for_endpoint;
+        }
+
+        pub fn evidenceAt(
+            self: *const Self,
+            index: usize,
+        ) ?EvidenceView {
+            var observed_index: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    continue;
+                }
+
+                if (observed_index == index) {
+                    return .{
+                        .evidence = &slot.evidence,
+                        .capture_observation_count = slot.capture_observation_count,
+                    };
+                }
+
+                observed_index += 1;
+            }
+
+            return null;
+        }
+
+        pub fn evidenceForEndpointAt(
+            self: *const Self,
+            key: EndpointKey,
+            index: usize,
+        ) ?EvidenceView {
+            var observed_index: usize = 0;
+
+            for (&self.slots) |*slot| {
+                if (!slot.occupied or
+                    !slot.evidence.endpoint().eql(key))
+                {
+                    continue;
+                }
+
+                if (observed_index == index) {
+                    return .{
+                        .evidence = &slot.evidence,
+                        .capture_observation_count = slot.capture_observation_count,
+                    };
+                }
+
+                observed_index += 1;
+            }
+
+            return null;
+        }
+
+        fn findExact(
+            self: *Self,
+            evidence: *const Owned,
+        ) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.evidence.eqlExact(evidence))
+                {
+                    return slot;
+                }
+            }
+
+            return null;
+        }
+
+        fn findFreeSlot(
+            self: *Self,
+        ) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (!slot.occupied) {
+                    return slot;
+                }
+            }
+
+            return null;
+        }
+    };
+}
+
 /// Borrowed UDS data-identifier evidence with the ISO-TP route on which it
 /// was observed.
 ///
@@ -2325,6 +2508,241 @@ test "owned diagnostic evidence preserves J1939 DM1 lamp state" {
 
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "diagnostic evidence inventory distinguishes capture count from reported count" {
+    const Inventory = DiagnosticEvidenceInventory(4);
+
+    var inventory: Inventory = .{};
+
+    const diagnostic =
+        fromJ1587(.{
+            .diagnostic_code = .{
+                .source_mid = 128,
+                .identifier_kind = .pid,
+                .identifier = 194,
+                .fmi = 5,
+                .status = .active,
+                .occurrence_count = 7,
+            },
+        });
+
+    try std.testing.expectEqual(
+        DiagnosticObserveResult.new_evidence,
+        try inventory.observe(diagnostic),
+    );
+
+    try std.testing.expectEqual(
+        DiagnosticObserveResult.existing_evidence,
+        try inventory.observe(diagnostic),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
+    );
+
+    const stored =
+        inventory.evidenceAt(0) orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        stored.capture_observation_count,
+    );
+
+    switch (stored.evidence.*) {
+        .j1587_diagnostic_code => |value| {
+            try std.testing.expectEqual(
+                @as(?u8, 7),
+                value.occurrence_count,
+            );
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(
+        DiagnosticObserveResult.new_evidence,
+        try inventory.observe(
+            fromJ1587(.{
+                .diagnostic_code = .{
+                    .source_mid = 128,
+                    .identifier_kind = .pid,
+                    .identifier = 194,
+                    .fmi = 5,
+                    .status = .active,
+                    .occurrence_count = 8,
+                },
+            }),
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
+    );
+
+    try std.testing.expectEqual(
+        DiagnosticObserveResult.non_diagnostic,
+        try inventory.observe(
+            fromJ1939(.{
+                .eec1_engine_speed = .{
+                    .source_address = 0x80,
+                    .delivery = .single_frame,
+                    .raw = 0x25c0,
+                    .rpm = 1208.0,
+                },
+            }),
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.count(),
+    );
+}
+
+test "diagnostic evidence inventory queries protocol-specific endpoints" {
+    const Inventory = DiagnosticEvidenceInventory(4);
+
+    var inventory: Inventory = .{};
+
+    _ = try inventory.observe(
+        fromJ1939(.{
+            .dm1_lamps = .{
+                .source_address = 0x80,
+                .delivery = .single_frame,
+                .statuses = .{
+                    .malfunction_indicator = .on,
+                    .red_stop = .off,
+                    .amber_warning = .on,
+                    .protect = .off,
+                },
+                .flashes = .{
+                    .malfunction_indicator = .slow,
+                    .red_stop = .slow,
+                    .amber_warning = .fast,
+                    .protect = .slow,
+                },
+            },
+        }),
+    );
+
+    _ = try inventory.observe(
+        fromJ1939(.{
+            .dm1_diagnostic_trouble_code = .{
+                .source_address = 0x80,
+                .delivery = .single_frame,
+                .trouble_code = .{
+                    .spn = 1234,
+                    .fmi = 3,
+                    .occurrence_count = 9,
+                    .conversion_method = false,
+                    .raw = .{ 0x11, 0x22, 0x33, 0x44 },
+                },
+            },
+        }),
+    );
+
+    _ = try inventory.observe(
+        fromJ1587(.{
+            .diagnostic_code = .{
+                .source_mid = 128,
+                .identifier_kind = .pid,
+                .identifier = 194,
+                .fmi = 5,
+                .status = .active,
+                .occurrence_count = 7,
+            },
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        inventory.count(),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        inventory.evidenceCountForEndpoint(.{
+            .j1939_source_address = 0x80,
+        }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.evidenceCountForEndpoint(.{
+            .j1587_mid = 128,
+        }),
+    );
+
+    try std.testing.expect(
+        inventory.evidenceForEndpointAt(
+            .{
+                .j1939_source_address = 0x80,
+            },
+            0,
+        ) != null,
+    );
+
+    try std.testing.expect(
+        inventory.evidenceForEndpointAt(
+            .{
+                .j1939_source_address = 0x80,
+            },
+            1,
+        ) != null,
+    );
+
+    try std.testing.expect(
+        inventory.evidenceForEndpointAt(
+            .{
+                .j1939_source_address = 0x80,
+            },
+            2,
+        ) == null,
+    );
+}
+
+test "diagnostic evidence inventory reports capacity exhaustion" {
+    const Inventory = DiagnosticEvidenceInventory(1);
+
+    var inventory: Inventory = .{};
+
+    _ = try inventory.observe(
+        fromJ1587(.{
+            .diagnostic_code = .{
+                .source_mid = 128,
+                .identifier_kind = .pid,
+                .identifier = 194,
+                .fmi = 5,
+                .status = .active,
+                .occurrence_count = 7,
+            },
+        }),
+    );
+
+    try std.testing.expectError(
+        error.DiagnosticEvidenceCapacityExceeded,
+        inventory.observe(
+            fromJ1587(.{
+                .diagnostic_code = .{
+                    .source_mid = 128,
+                    .identifier_kind = .pid,
+                    .identifier = 194,
+                    .fmi = 5,
+                    .status = .active,
+                    .occurrence_count = 8,
+                },
+            }),
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        inventory.count(),
+    );
 }
 
 test "J1587 observation retains MID endpoint" {
