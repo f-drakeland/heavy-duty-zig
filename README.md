@@ -248,9 +248,11 @@ Significant design decisions and their rationale are recorded in
 Heavy Duty Zig is pre-1.0 and under active development. Public APIs may still
 change.
 
-Current input begins after physical-layer decoding. J1708 input currently
-expects checksum handling to have already occurred, and J1939 input begins
-with decoded CAN frames or supported capture records.
+Current input begins after physical-layer decoding. J1708 input begins with
+externally delimited checksum-bearing frames or supported capture records; HDZ
+validates J1708 checksums and can conservatively recover frame boundaries from
+supported capture text. J1939 input begins with decoded CAN frames or supported
+capture records.
 
 Heavy Duty Zig can currently turn supported J1708/J1587 and J1939 traffic into
 typed diagnostic observations. J1939 logical messages may arrive directly,
