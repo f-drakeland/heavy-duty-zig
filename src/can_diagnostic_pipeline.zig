@@ -31,13 +31,21 @@ fn isObservedIsoTpIdentifier(
 /// occurrence lineage; it does not perform evidence correlation or
 /// claim physical ECU identity.
 ///
-/// Message payloads and returned lineage slices are borrowed views.
-/// Consume them before the next call to `push`.
+/// Returned messages and lineage are borrowed views.
+///
+/// Reassembled message payloads and lineage slices borrow pipeline-owned
+/// storage and must be consumed before the next call to `push`.
+///
+/// Single-frame message payloads borrow the input `can.FrameView` data.
+/// The caller must keep those bytes alive and unchanged while consuming
+/// the returned result.
+///
+/// As a uniform rule, consume all returned views before modifying the
+/// input frame storage or calling `push` again.
 pub fn Pipeline(
     comptime j1939_session_capacity: usize,
     comptime isotp_session_capacity: usize,
     comptime isotp_payload_capacity: usize,
-    comptime isotp_lineage_contribution_capacity: usize,
 ) type {
     if (j1939_session_capacity == 0) {
         @compileError(
@@ -56,12 +64,10 @@ pub fn Pipeline(
             "ISO-TP payload capacity must be greater than zero",
         );
     }
-
-    if (isotp_lineage_contribution_capacity == 0) {
-        @compileError(
-            "ISO-TP lineage contribution capacity must be greater than zero",
-        );
-    }
+    // Every accepted ISO-TP payload contributor supplies at least one
+    // logical-message byte. Deriving lineage capacity from payload capacity
+    // therefore guarantees that every accepted message can represent all of
+    // its payload contributors without a second independent storage limit.
 
     return struct {
         const Self = @This();
@@ -89,7 +95,7 @@ pub fn Pipeline(
             isotp_capture_lineage
                 .IsotpTransportLineageTracker(
                 isotp_session_capacity,
-                isotp_lineage_contribution_capacity,
+                isotp_payload_capacity,
             );
 
         pub const J1939Message = struct {
@@ -115,17 +121,31 @@ pub fn Pipeline(
             unsupported_frame: isotp.UnsupportedFrame,
         };
 
-        pub const PushResult = struct {
-            j1939: ?J1939Event = null,
-            isotp: ?IsotpEvent = null,
-        };
-
-        pub const Error =
+        pub const J1939Error =
             j1939.MessageAssemblyError ||
-            J1939Lineage.Error ||
+            J1939Lineage.Error;
+
+        pub const IsotpError =
             isotp.ParseError ||
             isotp.SessionError ||
             IsotpLineage.Error;
+
+        pub const J1939Outcome = union(enum) {
+            none,
+            event: J1939Event,
+            failure: J1939Error,
+        };
+
+        pub const IsotpOutcome = union(enum) {
+            none,
+            event: IsotpEvent,
+            failure: IsotpError,
+        };
+
+        pub const PushResult = struct {
+            j1939: J1939Outcome = .none,
+            isotp: IsotpOutcome = .none,
+        };
 
         j1939_assembler: J1939Assembler = .{},
         j1939_lineage: J1939Lineage = .{},
@@ -138,7 +158,7 @@ pub fn Pipeline(
 
         j1939_completed_lineage_count: usize = 0,
 
-        isotp_completed_lineage: [isotp_lineage_contribution_capacity]capture_lineage.MessagePayloadContribution =
+        isotp_completed_lineage: [isotp_payload_capacity]capture_lineage.MessagePayloadContribution =
             undefined,
 
         isotp_completed_lineage_count: usize = 0,
@@ -162,7 +182,7 @@ pub fn Pipeline(
         fn setJ1939TransportLineage(
             self: *Self,
             contributions: []const capture_lineage.MessagePayloadContribution,
-        ) Error![]const capture_lineage.MessagePayloadContribution {
+        ) J1939Error![]const capture_lineage.MessagePayloadContribution {
             if (contributions.len >
                 self.j1939_completed_lineage.len)
             {
@@ -199,7 +219,7 @@ pub fn Pipeline(
         fn setIsotpTransportLineage(
             self: *Self,
             contributions: []const capture_lineage.MessagePayloadContribution,
-        ) Error![]const capture_lineage.MessagePayloadContribution {
+        ) IsotpError![]const capture_lineage.MessagePayloadContribution {
             if (contributions.len >
                 self.isotp_completed_lineage.len)
             {
@@ -221,7 +241,7 @@ pub fn Pipeline(
             self: *Self,
             frame_occurrence: capture_lineage.FrameOccurrenceId,
             frame: can.FrameView,
-        ) Error!?J1939Event {
+        ) J1939Error!?J1939Event {
             const j1939_frame =
                 j1939.FrameView.fromCanFrame(
                     frame,
@@ -320,7 +340,7 @@ pub fn Pipeline(
             self: *Self,
             frame_occurrence: capture_lineage.FrameOccurrenceId,
             frame: can.FrameView,
-        ) Error!?IsotpEvent {
+        ) IsotpError!?IsotpEvent {
             const parsed =
                 try isotp.parse(
                     frame.data(),
@@ -437,7 +457,7 @@ pub fn Pipeline(
             self: *Self,
             frame_occurrence: capture_lineage.FrameOccurrenceId,
             frame: can.FrameView,
-        ) Error!PushResult {
+        ) PushResult {
             self.j1939_completed_lineage_count = 0;
             self.isotp_completed_lineage_count = 0;
 
@@ -449,25 +469,133 @@ pub fn Pipeline(
                 return result;
             }
 
-            result.j1939 =
-                try self.pushJ1939(
-                    frame_occurrence,
-                    frame,
-                );
+            result.j1939 = j1939_outcome: {
+                const maybe_event =
+                    self.pushJ1939(
+                        frame_occurrence,
+                        frame,
+                    ) catch |err| {
+                        break :j1939_outcome .{
+                            .failure = err,
+                        };
+                    };
+
+                if (maybe_event) |event| {
+                    break :j1939_outcome .{
+                        .event = event,
+                    };
+                }
+
+                break :j1939_outcome .none;
+            };
 
             if (isObservedIsoTpIdentifier(
                 frame.identifier(),
             )) {
-                result.isotp =
-                    try self.pushIsotp(
-                        frame_occurrence,
-                        frame,
-                    );
+                result.isotp = isotp_outcome: {
+                    const maybe_event =
+                        self.pushIsotp(
+                            frame_occurrence,
+                            frame,
+                        ) catch |err| {
+                            break :isotp_outcome .{
+                                .failure = err,
+                            };
+                        };
+
+                    if (maybe_event) |event| {
+                        break :isotp_outcome .{
+                            .event = event,
+                        };
+                    }
+
+                    break :isotp_outcome .none;
+                };
             }
 
             return result;
         }
     };
+}
+
+test "ISO-TP failure does not discard independent J1939 interpretation" {
+    const TestPipeline =
+        Pipeline(
+            2,
+            2,
+            64,
+        );
+
+    var pipeline: TestPipeline = .{};
+
+    const data = [_]u8{
+        0x00,
+        0x11,
+        0x22,
+        0x33,
+        0x44,
+        0x55,
+        0x66,
+        0x77,
+    };
+
+    const frame =
+        try can.FrameView.fromParts(
+            0x18daf100,
+            .extended,
+            .data,
+            data.len,
+            &data,
+        );
+
+    const result =
+        pipeline.push(
+            .{ .index = 42 },
+            frame,
+        );
+
+    switch (result.j1939) {
+        .event => |event| {
+            switch (event) {
+                .message => |completed| {
+                    try std.testing.expectEqual(
+                        @as(u32, 0x00da00),
+                        completed.message.pgn(),
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(usize, 1),
+                        completed.lineage.len,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(usize, 42),
+                        completed.lineage[0]
+                            .frame_occurrence.index,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        .none,
+        .failure,
+        => return error.TestUnexpectedResult,
+    }
+
+    switch (result.isotp) {
+        .failure => |err| {
+            try std.testing.expect(
+                err ==
+                    error.UnsupportedSingleFrameEscapeLength,
+            );
+        },
+
+        .none,
+        .event,
+        => return error.TestUnexpectedResult,
+    }
 }
 
 test "single pass preserves J1939 and ISO-TP lineage from public demo" {
@@ -476,7 +604,6 @@ test "single pass preserves J1939 and ISO-TP lineage from public demo" {
             4,
             4,
             64,
-            16,
         );
 
     var pipeline: DemoPipeline = .{};
@@ -521,101 +648,117 @@ test "single pass preserves J1939 and ISO-TP lineage from public demo" {
             try record.frame();
 
         const result =
-            try pipeline.push(
+            pipeline.push(
                 .{ .index = index },
                 frame,
             );
 
-        if (result.j1939) |event| {
-            switch (event) {
-                .message => |completed| {
-                    if (completed.message.pgn() ==
-                        j1939.pgn_component_identification)
-                    {
-                        const payload =
-                            completed.message.data();
+        switch (result.j1939) {
+            .none => {},
 
-                        @memcpy(
-                            j1939_payload[0..payload.len],
-                            payload,
-                        );
+            .failure => |err| {
+                return err;
+            },
 
-                        j1939_payload_len =
-                            payload.len;
+            .event => |event| {
+                switch (event) {
+                    .message => |completed| {
+                        if (completed.message.pgn() ==
+                            j1939.pgn_component_identification)
+                        {
+                            const payload =
+                                completed.message.data();
 
-                        found_j1939 = true;
+                            @memcpy(
+                                j1939_payload[0..payload.len],
+                                payload,
+                            );
 
-                        try std.testing.expectEqual(
-                            @as(usize, 5),
-                            completed.lineage.len,
-                        );
+                            j1939_payload_len =
+                                payload.len;
 
-                        try std.testing.expectEqual(
-                            @as(usize, 2),
-                            completed.lineage[0]
-                                .frame_occurrence.index,
-                        );
+                            found_j1939 = true;
 
-                        try std.testing.expectEqual(
-                            @as(usize, 6),
-                            completed.lineage[4]
-                                .frame_occurrence.index,
-                        );
-                    }
-                },
+                            try std.testing.expectEqual(
+                                @as(usize, 5),
+                                completed.lineage.len,
+                            );
 
-                else => {},
-            }
+                            try std.testing.expectEqual(
+                                @as(usize, 2),
+                                completed.lineage[0]
+                                    .frame_occurrence.index,
+                            );
+
+                            try std.testing.expectEqual(
+                                @as(usize, 6),
+                                completed.lineage[4]
+                                    .frame_occurrence.index,
+                            );
+                        }
+                    },
+
+                    else => {},
+                }
+            },
         }
 
-        if (result.isotp) |event| {
-            switch (event) {
-                .message => |completed| {
-                    const payload =
-                        completed.message.payload;
+        switch (result.isotp) {
+            .none => {},
 
-                    if (payload.len >= 3 and
-                        payload[0] == 0x62 and
-                        payload[1] == 0xf1 and
-                        payload[2] == 0x57)
-                    {
-                        @memcpy(
-                            isotp_payload[0..payload.len],
-                            payload,
-                        );
+            .failure => |err| {
+                return err;
+            },
 
-                        isotp_payload_len =
-                            payload.len;
+            .event => |event| {
+                switch (event) {
+                    .message => |completed| {
+                        const payload =
+                            completed.message.payload;
 
-                        found_isotp = true;
+                        if (payload.len >= 3 and
+                            payload[0] == 0x62 and
+                            payload[1] == 0xf1 and
+                            payload[2] == 0x57)
+                        {
+                            @memcpy(
+                                isotp_payload[0..payload.len],
+                                payload,
+                            );
 
-                        try std.testing.expectEqual(
-                            @as(usize, 6),
-                            completed.lineage.len,
-                        );
+                            isotp_payload_len =
+                                payload.len;
 
-                        try std.testing.expectEqual(
-                            @as(usize, 7),
-                            completed.lineage[0]
-                                .frame_occurrence.index,
-                        );
+                            found_isotp = true;
 
-                        try std.testing.expectEqual(
-                            @as(usize, 9),
-                            completed.lineage[1]
-                                .frame_occurrence.index,
-                        );
+                            try std.testing.expectEqual(
+                                @as(usize, 6),
+                                completed.lineage.len,
+                            );
 
-                        try std.testing.expectEqual(
-                            @as(usize, 13),
-                            completed.lineage[5]
-                                .frame_occurrence.index,
-                        );
-                    }
-                },
+                            try std.testing.expectEqual(
+                                @as(usize, 7),
+                                completed.lineage[0]
+                                    .frame_occurrence.index,
+                            );
 
-                else => {},
-            }
+                            try std.testing.expectEqual(
+                                @as(usize, 9),
+                                completed.lineage[1]
+                                    .frame_occurrence.index,
+                            );
+
+                            try std.testing.expectEqual(
+                                @as(usize, 13),
+                                completed.lineage[5]
+                                    .frame_occurrence.index,
+                            );
+                        }
+                    },
+
+                    else => {},
+                }
+            },
         }
     }
 
