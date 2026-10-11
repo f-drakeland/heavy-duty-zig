@@ -597,6 +597,446 @@ test "ISO-TP failure does not discard independent J1939 interpretation" {
         => return error.TestUnexpectedResult,
     }
 }
+test "ISO-TP session exhaustion preserves active transfer and lineage" {
+    const TestPipeline =
+        Pipeline(
+            2,
+            1,
+            64,
+        );
+
+    var pipeline: TestPipeline = .{};
+
+    const first_data = [_]u8{
+        0x10, 0x16,
+        0x62, 0xf1,
+        0x95, 0x00,
+        0x02, 0x56,
+    };
+
+    const competing_first_data = [_]u8{
+        0x10, 0x16,
+        0x62, 0xf1,
+        0x95, 0xaa,
+        0xbb, 0xcc,
+    };
+
+    const consecutive_data = [_][8]u8{
+        .{
+            0x21, 0x00, 0x01, 0x52,
+            0x15, 0x00, 0x00, 0x61,
+        },
+        .{
+            0x22, 0x0a, 0x01, 0x0a,
+            0x03, 0x0a, 0x0c, 0x00,
+        },
+        .{
+            0x23, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        },
+    };
+
+    const first_frame =
+        try can.FrameView.fromParts(
+            0x18daf100,
+            .extended,
+            .data,
+            first_data.len,
+            &first_data,
+        );
+
+    const first_result =
+        pipeline.push(
+            .{ .index = 200 },
+            first_frame,
+        );
+
+    try std.testing.expect(
+        first_result.isotp == .none,
+    );
+
+    const competing_first_frame =
+        try can.FrameView.fromParts(
+            0x18daf101,
+            .extended,
+            .data,
+            competing_first_data.len,
+            &competing_first_data,
+        );
+
+    const competing_result =
+        pipeline.push(
+            .{ .index = 201 },
+            competing_first_frame,
+        );
+
+    switch (competing_result.isotp) {
+        .failure => |err| {
+            try std.testing.expect(
+                err == error.SessionCapacityExceeded,
+            );
+        },
+
+        .none,
+        .event,
+        => return error.TestUnexpectedResult,
+    }
+
+    for (consecutive_data, 0..) |data, index| {
+        const frame =
+            try can.FrameView.fromParts(
+                0x18daf100,
+                .extended,
+                .data,
+                data.len,
+                &data,
+            );
+
+        const result =
+            pipeline.push(
+                .{ .index = 202 + index },
+                frame,
+            );
+
+        if (index < 2) {
+            try std.testing.expect(
+                result.isotp == .none,
+            );
+
+            continue;
+        }
+
+        switch (result.isotp) {
+            .event => |event| {
+                switch (event) {
+                    .message => |completed| {
+                        const expected = [_]u8{
+                            0x62, 0xf1, 0x95, 0x00,
+                            0x02, 0x56, 0x00, 0x01,
+                            0x52, 0x15, 0x00, 0x00,
+                            0x61, 0x0a, 0x01, 0x0a,
+                            0x03, 0x0a, 0x0c, 0x00,
+                            0x00, 0x00,
+                        };
+
+                        try std.testing.expectEqualSlices(
+                            u8,
+                            &expected,
+                            completed.message.payload,
+                        );
+
+                        try std.testing.expectEqual(
+                            @as(usize, 4),
+                            completed.lineage.len,
+                        );
+
+                        const expected_occurrences =
+                            [_]usize{
+                                200,
+                                202,
+                                203,
+                                204,
+                            };
+
+                        for (
+                            completed.lineage,
+                            expected_occurrences,
+                        ) |contribution, occurrence| {
+                            try std.testing.expectEqual(
+                                occurrence,
+                                contribution
+                                    .frame_occurrence.index,
+                            );
+                        }
+                    },
+
+                    else => return error.TestUnexpectedResult,
+                }
+            },
+
+            .none,
+            .failure,
+            => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "J1939 session exhaustion preserves active transfer and lineage" {
+    const TestPipeline =
+        Pipeline(
+            1,
+            2,
+            64,
+        );
+
+    var pipeline: TestPipeline = .{};
+
+    const rts_data = [_]u8{
+        0x10,
+        0x21,
+        0x00,
+        0x05,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const cts_data = [_]u8{
+        0x11,
+        0x05,
+        0x01,
+        0xff,
+        0xff,
+        0xeb,
+        0xfe,
+        0x00,
+    };
+
+    const packet_data = [_][8]u8{
+        .{
+            0x01,
+            0x48,
+            0x44,
+            0x5a,
+            0x2a,
+            0x50,
+            0x55,
+            0x42,
+        },
+        .{
+            0x02,
+            0x4c,
+            0x49,
+            0x43,
+            0x2d,
+            0x44,
+            0x45,
+            0x4d,
+        },
+        .{
+            0x03,
+            0x4f,
+            0x2a,
+            0x53,
+            0x59,
+            0x4e,
+            0x54,
+            0x48,
+        },
+        .{
+            0x04,
+            0x30,
+            0x30,
+            0x30,
+            0x31,
+            0x2a,
+            0x55,
+            0x4e,
+        },
+        .{
+            0x05,
+            0x49,
+            0x54,
+            0x30,
+            0x31,
+            0x2a,
+            0xff,
+            0xff,
+        },
+    };
+
+    const rts_frame =
+        try can.FrameView.fromParts(
+            0x1cecf900,
+            .extended,
+            .data,
+            rts_data.len,
+            &rts_data,
+        );
+
+    const start_result =
+        pipeline.push(
+            .{ .index = 300 },
+            rts_frame,
+        );
+
+    try std.testing.expect(
+        start_result.j1939 == .none,
+    );
+
+    const competing_rts_frame =
+        try can.FrameView.fromParts(
+            0x1cecf901,
+            .extended,
+            .data,
+            rts_data.len,
+            &rts_data,
+        );
+
+    const competing_result =
+        pipeline.push(
+            .{ .index = 301 },
+            competing_rts_frame,
+        );
+
+    switch (competing_result.j1939) {
+        .failure => |err| {
+            try std.testing.expect(
+                err == error.SessionCapacityExceeded,
+            );
+        },
+
+        .none,
+        .event,
+        => return error.TestUnexpectedResult,
+    }
+
+    const cts_frame =
+        try can.FrameView.fromParts(
+            0x1cec00f9,
+            .extended,
+            .data,
+            cts_data.len,
+            &cts_data,
+        );
+
+    const cts_result =
+        pipeline.push(
+            .{ .index = 302 },
+            cts_frame,
+        );
+
+    switch (cts_result.j1939) {
+        .event => |event| {
+            switch (event) {
+                .unsupported_transport_control => {},
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        .none,
+        .failure,
+        => return error.TestUnexpectedResult,
+    }
+
+    for (packet_data, 0..) |data, index| {
+        const frame =
+            try can.FrameView.fromParts(
+                0x1cebf900,
+                .extended,
+                .data,
+                data.len,
+                &data,
+            );
+
+        const result =
+            pipeline.push(
+                .{ .index = 303 + index },
+                frame,
+            );
+
+        if (index < 4) {
+            try std.testing.expect(
+                result.j1939 == .none,
+            );
+
+            continue;
+        }
+
+        switch (result.j1939) {
+            .event => |event| {
+                switch (event) {
+                    .message => |completed| {
+                        const expected = [_]u8{
+                            0x48, 0x44, 0x5a, 0x2a,
+                            0x50, 0x55, 0x42, 0x4c,
+                            0x49, 0x43, 0x2d, 0x44,
+                            0x45, 0x4d, 0x4f, 0x2a,
+                            0x53, 0x59, 0x4e, 0x54,
+                            0x48, 0x30, 0x30, 0x30,
+                            0x31, 0x2a, 0x55, 0x4e,
+                            0x49, 0x54, 0x30, 0x31,
+                            0x2a,
+                        };
+
+                        try std.testing.expectEqualSlices(
+                            u8,
+                            &expected,
+                            completed.message.data(),
+                        );
+
+                        try std.testing.expectEqual(
+                            @as(usize, 5),
+                            completed.lineage.len,
+                        );
+
+                        const expected_occurrences =
+                            [_]usize{
+                                303,
+                                304,
+                                305,
+                                306,
+                                307,
+                            };
+
+                        const expected_offsets =
+                            [_]usize{
+                                0,
+                                7,
+                                14,
+                                21,
+                                28,
+                            };
+
+                        const expected_lengths =
+                            [_]usize{
+                                7,
+                                7,
+                                7,
+                                7,
+                                5,
+                            };
+
+                        for (
+                            completed.lineage,
+                            expected_occurrences,
+                            expected_offsets,
+                            expected_lengths,
+                        ) |
+                            contribution,
+                            occurrence,
+                            offset,
+                            byte_length,
+                        | {
+                            try std.testing.expectEqual(
+                                occurrence,
+                                contribution
+                                    .frame_occurrence.index,
+                            );
+
+                            try std.testing.expectEqual(
+                                offset,
+                                contribution.message_offset,
+                            );
+
+                            try std.testing.expectEqual(
+                                byte_length,
+                                contribution.byte_length,
+                            );
+                        }
+                    },
+
+                    else => return error.TestUnexpectedResult,
+                }
+            },
+
+            .none,
+            .failure,
+            => return error.TestUnexpectedResult,
+        }
+    }
+}
 
 test "single pass preserves J1939 and ISO-TP lineage from public demo" {
     const DemoPipeline =
@@ -780,4 +1220,200 @@ test "single pass preserves J1939 and ISO-TP lineage from public demo" {
         j1939_payload[0..j1939_payload_len],
         isotp_payload[3..isotp_payload_len],
     );
+}
+
+test "rejected ISO-TP overlap preserves active transfer and lineage" {
+    const TestPipeline =
+        Pipeline(
+            2,
+            2,
+            64,
+        );
+
+    var pipeline: TestPipeline = .{};
+
+    const first_data = [_]u8{
+        0x10, 0x16,
+        0x62, 0xf1,
+        0x95, 0x00,
+        0x02, 0x56,
+    };
+
+    const overlapping_single_data = [_]u8{
+        0x02, 0x10, 0x03,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+
+    const consecutive_data = [_][8]u8{
+        .{
+            0x21, 0x00, 0x01, 0x52,
+            0x15, 0x00, 0x00, 0x61,
+        },
+        .{
+            0x22, 0x0a, 0x01, 0x0a,
+            0x03, 0x0a, 0x0c, 0x00,
+        },
+        .{
+            0x23, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        },
+    };
+
+    const first_frame =
+        try can.FrameView.fromParts(
+            0x18daf100,
+            .extended,
+            .data,
+            first_data.len,
+            &first_data,
+        );
+
+    const first_result =
+        pipeline.push(
+            .{ .index = 100 },
+            first_frame,
+        );
+
+    try std.testing.expect(
+        first_result.isotp == .none,
+    );
+
+    const overlapping_single_frame =
+        try can.FrameView.fromParts(
+            0x18daf100,
+            .extended,
+            .data,
+            overlapping_single_data.len,
+            &overlapping_single_data,
+        );
+
+    const overlap_result =
+        pipeline.push(
+            .{ .index = 101 },
+            overlapping_single_frame,
+        );
+
+    switch (overlap_result.isotp) {
+        .failure => |err| {
+            try std.testing.expect(
+                err == error.TransferAlreadyActive,
+            );
+        },
+
+        .none,
+        .event,
+        => return error.TestUnexpectedResult,
+    }
+
+    for (consecutive_data, 0..) |data, index| {
+        const frame =
+            try can.FrameView.fromParts(
+                0x18daf100,
+                .extended,
+                .data,
+                data.len,
+                &data,
+            );
+
+        const result =
+            pipeline.push(
+                .{ .index = 102 + index },
+                frame,
+            );
+
+        if (index < 2) {
+            try std.testing.expect(
+                result.isotp == .none,
+            );
+
+            continue;
+        }
+
+        switch (result.isotp) {
+            .event => |event| {
+                switch (event) {
+                    .message => |completed| {
+                        const expected = [_]u8{
+                            0x62, 0xf1, 0x95, 0x00,
+                            0x02, 0x56, 0x00, 0x01,
+                            0x52, 0x15, 0x00, 0x00,
+                            0x61, 0x0a, 0x01, 0x0a,
+                            0x03, 0x0a, 0x0c, 0x00,
+                            0x00, 0x00,
+                        };
+
+                        try std.testing.expectEqualSlices(
+                            u8,
+                            &expected,
+                            completed.message.payload,
+                        );
+
+                        try std.testing.expectEqual(
+                            @as(usize, 4),
+                            completed.lineage.len,
+                        );
+
+                        const expected_occurrences =
+                            [_]usize{
+                                100,
+                                102,
+                                103,
+                                104,
+                            };
+
+                        const expected_offsets =
+                            [_]usize{
+                                0,
+                                6,
+                                13,
+                                20,
+                            };
+
+                        const expected_lengths =
+                            [_]usize{
+                                6,
+                                7,
+                                7,
+                                2,
+                            };
+
+                        for (
+                            completed.lineage,
+                            expected_occurrences,
+                            expected_offsets,
+                            expected_lengths,
+                        ) |
+                            contribution,
+                            occurrence,
+                            offset,
+                            byte_length,
+                        | {
+                            try std.testing.expectEqual(
+                                occurrence,
+                                contribution
+                                    .frame_occurrence.index,
+                            );
+
+                            try std.testing.expectEqual(
+                                offset,
+                                contribution.message_offset,
+                            );
+
+                            try std.testing.expectEqual(
+                                byte_length,
+                                contribution.byte_length,
+                            );
+                        }
+                    },
+
+                    else => return error.TestUnexpectedResult,
+                }
+            },
+
+            .none,
+            .failure,
+            => return error.TestUnexpectedResult,
+        }
+    }
 }
