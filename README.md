@@ -8,6 +8,28 @@ protocol facts, diagnostic evidence, uncertainty, and evidence-backed
 relationships without silently promoting network observations into stronger
 physical-device claims.
 
+## See the evidence model in 30 seconds
+
+With Zig 0.17:
+
+```sh
+zig build demo
+```
+
+The included synthetic capture carries the same 33-byte evidence payload through
+two independent protocol paths: J1939 Component Identification over directed
+RTS/CTS and UDS ReadDataByIdentifier over multi-frame ISO-TP.
+
+HDZ reconstructs both observations, preserves the exact frame occurrences that
+contributed payload bytes on each path, and records their payload equality as
+evidence.
+
+It does **not** turn that equality into a claim that both observations came from
+the same physical ECU.
+
+`zig build check` runs the full repository verification, including this public
+demo against its expected output.
+
 ## Current scope
 
 Heavy Duty Zig currently supports diagnostic evidence extraction from
@@ -28,7 +50,6 @@ J1708/J1587, J1939, and observed ISO-TP/UDS traffic.
 - occurrence count handling
 - page-two identifier expansion
 - stateful J1587 message decoding
-- automatic PID 192 multisection handling
 - typed observation delivery from raw J1587 messages
 - explicit handling of unsupported valid parameters
 
@@ -100,6 +121,7 @@ Application code can then import the library with:
 ```zig
 const heavy_duty = @import("heavy_duty");
 ```
+
 For CAN-side diagnostic orchestration, HDZ also exposes a bounded single-pass
 pipeline that keeps J1939 and the observed ISO-TP path independent while
 preserving capture-occurrence lineage.
@@ -141,6 +163,10 @@ switch (result.isotp) {
         _ = err;
     },
 }
+```
+
+Reassembled message payloads and lineage borrow pipeline-owned storage and
+should be consumed before the next call to `push`.
 
 This dependency path has been validated from a separate Zig 0.17 consumer
 project.
@@ -182,8 +208,7 @@ The same payload is transported independently as:
 Run the public proof with:
 
 ```sh
-zig run src/ddec_cross_protocol_inspect.zig -- \
-    captures/public/cross_protocol_lineage_demo.csv
+zig build demo
 ```
 
 The result preserves separate occurrence lineage on both protocol paths and
@@ -215,9 +240,13 @@ Heavy Duty Zig is intentionally separate from Trailer Fingerprint Software.
 TFS may eventually consume this library, but Heavy Duty Zig does not contain
 trailer fingerprinting logic.
 
+Significant design decisions and their rationale are recorded in
+[Architecture Decisions](docs/ARCHITECTURE_DECISIONS.md).
+
 ## Status
 
-Early development.
+Heavy Duty Zig is pre-1.0 and under active development. Public APIs may still
+change.
 
 Current input begins after physical-layer decoding. J1708 input currently
 expects checksum handling to have already occurred, and J1939 input begins
@@ -256,7 +285,7 @@ UDS evidence-range projection, and relationship construction. HDZ therefore
 does not claim one universal capture-to-diagnostic application pipeline across
 every supported input family.
 
-## Tracking
+## Current direction
 
 Current diagnostic direction:
 
@@ -289,3 +318,7 @@ Future work can build on occurrence identity for richer temporal,
 request/response, sequence, and state-transition relationships, and can define
 how multiple capture sources or clock domains should be represented, without
 promoting those relationships into unsupported physical-device claims.
+
+## License
+
+Heavy Duty Zig is available under the [MIT License](LICENSE).
