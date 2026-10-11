@@ -83,18 +83,30 @@ capture frame occurrence
 
 ## Current limits
 
-This remains an authentic-capture developer-inspector proof of the architecture,
-not yet a generalized capture-ingestion pipeline.
+This document records a focused authentic-capture validation run, but the
+transport-lineage machinery demonstrated by that run is no longer specific to
+the developer inspector.
 
-The J1939 and ISO-TP sides now use reusable bounded capture-lineage trackers
-rather than proof-specific single-transfer lineage state. Protocol reassembly
+HDZ now exposes reusable bounded `can_diagnostic_pipeline` orchestration for
+J1939 and the observed 29-bit ISO-TP address-byte form. Protocol reassembly
 remains authoritative for transfer membership and message-relative payload
-derivation, while capture orchestration attaches frame-occurrence identity.
+derivation, while the orchestration layer attaches capture-occurrence identity
+and returns completed payload lineage.
+
+The reusable pipeline preserves the two protocol interpretations independently.
+Malformed or capacity-limited traffic on one path can be reported without
+discarding a valid outcome from the other, and focused state-recovery tests
+verify that rejected overlap and session exhaustion do not contaminate an
+already-active transfer or its lineage.
 
 Diagnostic evidence selection is still performed by the focused
-cross-protocol inspector. The validation therefore demonstrates reusable
-transport-lineage machinery and evidence projection, but not yet a general
-capture-to-diagnostic-output application pipeline.
+cross-protocol inspector. That inspector also projects ISO-TP logical-message
+lineage past the UDS service and DID bytes into the evidence-relative range and
+records the durable `exact_payload_equality` relationship.
+
+HDZ therefore has reusable CAN transport-to-lineage orchestration, but does not
+claim one universal capture-to-diagnostic-output application pipeline spanning
+all input formats and protocol families.
 
 The validation also does not establish that the matching J1939 and UDS evidence
 came from the same physical ECU. The retained relationship states only what the

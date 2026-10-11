@@ -1,6 +1,6 @@
 # Heavy Duty Zig — Architecture Decisions
 
-Updated: 2026-10-09
+Updated: 2026-10-10
 
 This document records significant architectural decisions for Heavy Duty Zig (HDZ).
 It is not a changelog. Small implementation details do not belong here.
@@ -898,9 +898,27 @@ cross-protocol relationship:
   establishes transfer start, while CTS and ISO-TP Flow Control provide
   transport context.
 
-The focused developer-inspector implementation is not yet a generalized
-capture-ingestion pipeline, and the J1939 proof collector is narrower than the
-multi-session protocol assembler.
+Reusable bounded CAN orchestration is now implemented in
+`src/can_diagnostic_pipeline.zig`. It combines protocol-reported derivation with
+capture-local occurrence identity for both J1939 and the observed ISO-TP path,
+while keeping the two protocol interpretations independent.
+
+The orchestration uses the existing multi-session J1939 assembler and ISO-TP
+router as transport authorities. It does not independently reconstruct transfer
+membership. Completed logical messages can therefore carry the exact accepted
+payload-contributing frame occurrences without embedding capture metadata in the
+protocol layers.
+
+The public pipeline also reports J1939 and ISO-TP outcomes independently, so a
+failure in one interpretation does not discard a valid result from the other.
+Focused robustness validation confirms that rejected overlapping traffic and
+session-capacity exhaustion do not corrupt an already-active transfer or its
+lineage.
+
+Diagnostic evidence selection, evidence-range projection, and cross-protocol
+relationship construction remain higher-level responsibilities. The reusable
+CAN pipeline should therefore not be described as one universal
+capture-to-diagnostic application pipeline.
 
 ---
 
@@ -919,8 +937,9 @@ The remaining questions are narrower:
   comparable;
 - how should transport-context occurrences be retained and related to evidence
   occurrences when they do not contribute payload bytes;
-- how should the proven occurrence model be generalized from focused
-  developer-inspector paths into reusable capture orchestration;
+- what shared capture-source abstractions, if any, are useful above the existing
+  J1708/J1587 and CAN orchestration paths without forcing distinct protocol and
+  recovery semantics into one ingestion model;
 - which occurrence-level relationships should be introduced first: temporal,
   request/response, sequence, or state-transition relationships.
 

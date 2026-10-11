@@ -100,6 +100,47 @@ Application code can then import the library with:
 ```zig
 const heavy_duty = @import("heavy_duty");
 ```
+For CAN-side diagnostic orchestration, HDZ also exposes a bounded single-pass
+pipeline that keeps J1939 and the observed ISO-TP path independent while
+preserving capture-occurrence lineage.
+
+Given an already-decoded `can.FrameView`:
+
+```zig
+const DiagnosticPipeline =
+    heavy_duty.can_diagnostic_pipeline.Pipeline(
+        4,   // J1939 transport sessions
+        4,   // ISO-TP sessions
+        256, // ISO-TP payload bytes
+    );
+
+var pipeline: DiagnosticPipeline = .{};
+
+const result =
+    pipeline.push(
+        .{ .index = occurrence_index },
+        frame,
+    );
+
+switch (result.j1939) {
+    .none => {},
+    .event => |event| {
+        _ = event;
+    },
+    .failure => |err| {
+        _ = err;
+    },
+}
+
+switch (result.isotp) {
+    .none => {},
+    .event => |event| {
+        _ = event;
+    },
+    .failure => |err| {
+        _ = err;
+    },
+}
 
 This dependency path has been validated from a separate Zig 0.17 consumer
 project.
@@ -199,14 +240,21 @@ permanent controller or physical ECU identity. Active diagnostic requests,
 fault clearing, programming operations, and physical-layer acquisition are
 not implemented yet.
 
-Occurrence-level evidence lineage has also been validated in focused
-developer-inspector paths against authentic J1939 and ISO-TP/UDS capture data.
-Both sides of a 33-byte cross-protocol evidence relationship can be traced
-independently to the exact frame occurrences that supplied their payload bytes.
-See [Authentic Cross-Protocol Lineage Validation](docs/AUTHENTIC_CROSS_PROTOCOL_LINEAGE_VALIDATION.md).
+Occurrence-level evidence lineage has been validated against authentic J1939
+and ISO-TP/UDS capture data. Both sides of a 33-byte cross-protocol evidence
+relationship can be traced independently to the exact frame occurrences that
+supplied their payload bytes. See
+[Authentic Cross-Protocol Lineage Validation](docs/AUTHENTIC_CROSS_PROTOCOL_LINEAGE_VALIDATION.md).
 
-This validation demonstrates the architecture; the lineage orchestration is not
-yet a generalized capture-ingestion pipeline.
+The CAN-side transport and lineage path is now available through reusable,
+bounded `can_diagnostic_pipeline` orchestration rather than existing only in a
+focused proof. J1939 and observed ISO-TP remain independent interpretations of
+the same CAN frame, and each reports its own event or failure outcome.
+
+The focused cross-protocol inspector still owns diagnostic evidence selection,
+UDS evidence-range projection, and relationship construction. HDZ therefore
+does not claim one universal capture-to-diagnostic application pipeline across
+every supported input family.
 
 ## Tracking
 
@@ -232,7 +280,12 @@ sides of an exact 33-byte cross-protocol payload relationship retain their own
 capture-frame lineage while transport-control frames remain separate from
 payload contributors.
 
-The current work is to generalize that proven lineage model beyond the focused
-developer-inspector paths, then use occurrence identity to support richer
-temporal, request/response, sequence, and state-transition relationships without
+Reusable CAN orchestration now carries the proven occurrence-lineage model
+through J1939 and the observed ISO-TP path while keeping protocol assembly
+authoritative for transfer membership. J1708/J1587 capture recovery and
+decoding remain a separate ingestion path with their own input semantics.
+
+Future work can build on occurrence identity for richer temporal,
+request/response, sequence, and state-transition relationships, and can define
+how multiple capture sources or clock domains should be represented, without
 promoting those relationships into unsupported physical-device claims.

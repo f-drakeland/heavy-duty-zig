@@ -43,11 +43,17 @@ The authentic cross-protocol proof now retains:
 
 Transport-control frames remain distinct from payload contributors.
 
-This is currently an authentic-capture developer-inspector proof of the lineage
-architecture, not yet a generalized capture-ingestion pipeline. In particular,
-the J1939 component-lineage collector used by the proof is narrower than the
-multi-session protocol assembler and should not be described as general
-concurrent-transfer lineage handling.
+Subsequent redirected work has moved the CAN-side lineage architecture beyond
+this original focused proof. HDZ now exposes reusable bounded
+`can_diagnostic_pipeline` orchestration built on the multi-session J1939
+assembler and ISO-TP router, with capture-occurrence lineage attached above the
+protocol layers.
+
+The focused cross-protocol inspector still performs diagnostic evidence
+selection, evidence-range projection, and relationship construction. This
+subsequent work therefore generalizes the CAN transport-to-lineage path without
+retroactively turning Milestone 7 into a universal capture-ingestion milestone
+or changing the historical completion criteria retained below.
 
 ## Goal
 
