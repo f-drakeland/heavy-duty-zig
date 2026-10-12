@@ -50,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
         \\transport aborts matched active session: {}
         \\RTS/CTS payloads reassembled: {}
         \\assembly errors: {}
+        \\Request observations: {}
         \\Address claim observations: {}
         \\Component identification observations: {}
         \\EEC1 engine speed observations: {}
@@ -76,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
             audit.transport_aborts_matched,
             audit.rts_cts_payloads_reassembled,
             audit.assembly_errors,
+            audit.request_observations,
             audit.address_claim_observations,
             audit.component_identification_observations,
             audit.eec1_engine_speed_observations,

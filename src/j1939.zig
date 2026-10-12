@@ -4,6 +4,7 @@ const can = @import("can.zig");
 pub const transport = @import("j1939/transport.zig");
 pub const dm1 = @import("j1939/dm1.zig");
 pub const eec1 = @import("j1939/eec1.zig");
+pub const request = @import("j1939/request.zig");
 pub const address_claim = @import("j1939/address_claim.zig");
 pub const component_identification =
     @import("j1939/component_identification.zig");
@@ -11,6 +12,7 @@ pub const component_identification =
 pub const pdu2_format_min: u8 = 0xf0;
 
 pub const pgn_transport_data_transfer: u32 = 0x00eb00;
+pub const pgn_request: u32 = 0x00ea00;
 pub const pgn_transport_connection_management: u32 = 0x00ec00;
 pub const pgn_address_claimed: u32 = 0x00ee00;
 pub const pgn_component_identification: u32 = 0x00feeb;
@@ -28,6 +30,7 @@ pub const PduKind = enum {
 };
 
 pub const PgnClassification = union(enum) {
+    request,
     transport_data_transfer,
     transport_connection_management,
     address_claimed,
@@ -63,6 +66,14 @@ pub const Eec1EngineSpeedObservation = struct {
     rpm: f64,
 };
 
+pub const RequestObservation = struct {
+    source_address: u8,
+    destination_address: ?u8,
+    delivery: MessageDelivery,
+    requested_pgn: u32,
+    raw_payload: []const u8,
+};
+
 pub const AddressClaimObservation = struct {
     source_address: u8,
     delivery: MessageDelivery,
@@ -84,6 +95,7 @@ pub const ComponentIdentificationObservation = struct {
 };
 
 pub const Observation = union(enum) {
+    request: RequestObservation,
     component_identification: ComponentIdentificationObservation,
     address_claim: AddressClaimObservation,
     eec1_engine_speed: Eec1EngineSpeedObservation,
@@ -176,10 +188,13 @@ pub const MessageDecodeError =
     address_claim.ParseError ||
     dm1.PayloadError ||
     dm1.ParseError ||
-    eec1.ParseError;
+    eec1.ParseError ||
+    request.ParseError;
 
 pub fn classifyPgn(pgn: u32) PgnClassification {
     return switch (pgn) {
+        pgn_request => .request,
+
         pgn_transport_data_transfer => .transport_data_transfer,
 
         pgn_transport_connection_management => .transport_connection_management,
@@ -848,6 +863,13 @@ pub const MessageCursor = struct {
     delivery_method: MessageDelivery,
     state: State,
 
+    const RequestState = struct {
+        parsed: request.Request,
+        destination_address: ?u8,
+        raw_payload: []const u8,
+        emitted: bool = false,
+    };
+
     const Dm1State = struct {
         payload: dm1.PayloadView,
         iterator: dm1.DtcIterator,
@@ -877,6 +899,7 @@ pub const MessageCursor = struct {
     };
 
     const State = union(enum) {
+        request: RequestState,
         component_identification: ComponentIdentificationState,
         address_claim: AddressClaimState,
         eec1: Eec1State,
@@ -887,6 +910,24 @@ pub const MessageCursor = struct {
     pub fn init(
         message: MessageView,
     ) MessageDecodeError!MessageCursor {
+        if (message.pgn() == pgn_request) {
+            const parsed =
+                try request.parse(
+                    message.data(),
+                );
+
+            return .{
+                .source_address = message.sourceAddress(),
+                .delivery_method = message.delivery(),
+                .state = .{
+                    .request = .{
+                        .parsed = parsed,
+                        .destination_address = message.destinationAddress(),
+                        .raw_payload = message.data(),
+                    },
+                },
+            };
+        }
         if (message.pgn() == pgn_address_claimed) {
             const name =
                 try address_claim.parse(
@@ -970,6 +1011,25 @@ pub const MessageCursor = struct {
         self: *MessageCursor,
     ) MessageDecodeError!?MessageEvent {
         switch (self.state) {
+            .request => |*state| {
+                if (state.emitted) {
+                    return null;
+                }
+
+                state.emitted = true;
+
+                return .{
+                    .observation = .{
+                        .request = .{
+                            .source_address = self.source_address,
+                            .destination_address = state.destination_address,
+                            .delivery = self.delivery_method,
+                            .requested_pgn = state.parsed.requested_pgn,
+                            .raw_payload = state.raw_payload,
+                        },
+                    },
+                };
+            },
             .address_claim => |*state| {
                 if (state.emitted) {
                     return null;
@@ -1442,6 +1502,88 @@ test "logical message view preserves single-frame PDU1 destination" {
     try std.testing.expectEqual(
         @as(?u8, 0x00),
         message.destinationAddress(),
+    );
+}
+
+test "decodes request observation with PDU1 destination" {
+    const payload = [_]u8{
+        0xec,
+        0xfe,
+        0x00,
+    };
+
+    const can_frame =
+        try can.FrameView.fromParts(
+            0x18eaff31,
+            .extended,
+            .data,
+            3,
+            &payload,
+        );
+
+    const frame =
+        try FrameView.fromCanFrame(
+            can_frame,
+        );
+
+    try std.testing.expectEqual(
+        PgnClassification.request,
+        frame.pgnClassification(),
+    );
+
+    const message =
+        MessageView.fromSingleFrame(
+            frame,
+        );
+
+    var cursor =
+        try MessageCursor.init(
+            message,
+        );
+
+    const event =
+        (try cursor.next()).?;
+
+    switch (event) {
+        .observation => |observation| {
+            switch (observation) {
+                .request => |request_observation| {
+                    try std.testing.expectEqual(
+                        @as(u8, 0x31),
+                        request_observation.source_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(?u8, 0xff),
+                        request_observation.destination_address,
+                    );
+
+                    try std.testing.expectEqual(
+                        MessageDelivery.single_frame,
+                        request_observation.delivery,
+                    );
+
+                    try std.testing.expectEqual(
+                        @as(u32, 0x00feec),
+                        request_observation.requested_pgn,
+                    );
+
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &payload,
+                        request_observation.raw_payload,
+                    );
+                },
+
+                else => return error.TestUnexpectedResult,
+            }
+        },
+
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(
+        try cursor.next() == null,
     );
 }
 

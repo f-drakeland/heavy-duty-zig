@@ -23,6 +23,7 @@ pub const Audit = struct {
     rts_cts_payloads_reassembled: usize = 0,
     assembly_errors: usize = 0,
 
+    request_observations: usize = 0,
     address_claim_observations: usize = 0,
     component_identification_observations: usize = 0,
     eec1_engine_speed_observations: usize = 0,
@@ -65,6 +66,9 @@ fn auditMessage(
 
             .observation => |observation| {
                 switch (observation) {
+                    .request => {
+                        audit.request_observations += 1;
+                    },
                     .component_identification => {
                         audit.component_identification_observations += 1;
                     },
@@ -141,6 +145,8 @@ pub fn auditText(
         audit.j1939_frames += 1;
 
         switch (frame.pgnClassification()) {
+            .request => {},
+
             .transport_connection_management => audit.tp_cm_frames += 1,
 
             .transport_data_transfer => audit.tp_dt_frames += 1,
@@ -193,6 +199,49 @@ pub fn auditText(
     }
 
     return audit;
+}
+
+test "audits J1939 request observation through pipeline" {
+    const text =
+        \\(001.000000) can1 18EAFF31#ECFE00
+    ;
+
+    const audit =
+        auditText(
+            64,
+            4,
+            text,
+        );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        audit.records_seen,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        audit.records_parsed,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        audit.j1939_frames,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        audit.request_observations,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        audit.unsupported_pgn_messages,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        audit.decode_errors,
+    );
 }
 
 test "audits direct DM1 through J1939 pipeline" {

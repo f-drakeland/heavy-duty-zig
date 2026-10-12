@@ -1429,6 +1429,7 @@ pub fn OwnedIdentityObservation(
                         },
                     },
 
+                    .request,
                     .eec1_engine_speed,
                     .dm1_lamps,
                     .dm1_diagnostic_trouble_code,
@@ -2048,6 +2049,8 @@ pub fn fromJ1939(
     observation: j1939.Observation,
 ) EndpointObservation {
     const source_address = switch (observation) {
+        .request => |value| value.source_address,
+
         .component_identification => |value| value.source_address,
 
         .address_claim => |value| value.source_address,
@@ -4617,7 +4620,7 @@ test "authentic J1939 capture fragment builds participant correlation" {
     );
 
     try std.testing.expectEqual(
-        @as(?usize, 1),
+        @as(?usize, 2),
         endpoints.observationCount(.{
             .j1939_source_address = 0xf9,
         }),
