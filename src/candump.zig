@@ -64,6 +64,80 @@ pub fn parseLine(
         tokens.next() orelse
         return error.InvalidRecord;
 
+    if (std.mem.indexOfScalar(
+        u8,
+        identifier_token,
+        '#',
+    )) |separator| {
+        const identifier_text =
+            identifier_token[0..separator];
+
+        const data_text =
+            identifier_token[separator + 1 ..];
+
+        if (identifier_text.len != 8) {
+            return error.InvalidIdentifier;
+        }
+
+        const identifier =
+            std.fmt.parseInt(
+                u32,
+                identifier_text,
+                16,
+            ) catch {
+                return error.InvalidIdentifier;
+            };
+
+        if (identifier > can.extended_identifier_max) {
+            return error.InvalidIdentifier;
+        }
+
+        if (data_text.len % 2 != 0) {
+            return error.InvalidDataByte;
+        }
+
+        const data_length =
+            data_text.len / 2;
+
+        if (data_length > can.classic_data_max) {
+            return error.InvalidDataLengthCode;
+        }
+
+        const data_length_code: u8 =
+            @intCast(data_length);
+
+        var data_storage: [can.classic_data_max]u8 =
+            undefined;
+
+        var index: usize = 0;
+
+        while (index < data_length_code) : (index += 1) {
+            const byte_start =
+                index * 2;
+
+            data_storage[index] =
+                std.fmt.parseInt(
+                    u8,
+                    data_text[byte_start .. byte_start + 2],
+                    16,
+                ) catch {
+                    return error.InvalidDataByte;
+                };
+        }
+
+        if (tokens.next() != null) {
+            return error.DataLengthMismatch;
+        }
+
+        return .{
+            .timestamp_text = timestamp_token,
+            .interface_name = interface_name,
+            .identifier = identifier,
+            .data_length_code = data_length_code,
+            .data_storage = data_storage,
+        };
+    }
+
     // The authentic corpus uses eight hexadecimal digits for extended CAN IDs.
     if (identifier_token.len != 8) {
         return error.InvalidIdentifier;
@@ -141,6 +215,70 @@ pub fn parseLine(
         .data_length_code = data_length_code,
         .data_storage = data_storage,
     };
+}
+
+test "parses compact candump extended CAN record" {
+    const line =
+        "(1604007042.461135) can1 18FEBF0B#80067D7D79777B79";
+
+    const record =
+        try parseLine(line);
+
+    try std.testing.expectEqualStrings(
+        "(1604007042.461135)",
+        record.timestamp_text,
+    );
+
+    try std.testing.expectEqualStrings(
+        "can1",
+        record.interface_name,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, 0x18febf0b),
+        record.identifier,
+    );
+
+    try std.testing.expectEqual(
+        @as(u8, 8),
+        record.data_length_code,
+    );
+
+    const frame =
+        try record.frame();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{
+            0x80,
+            0x06,
+            0x7d,
+            0x7d,
+            0x79,
+            0x77,
+            0x7b,
+            0x79,
+        },
+        frame.data(),
+    );
+}
+
+test "rejects compact candump record with odd-length payload" {
+    try std.testing.expectError(
+        error.InvalidDataByte,
+        parseLine(
+            "(1604007042.461135) can1 18FEBF0B#80067D7D79777B7",
+        ),
+    );
+}
+
+test "rejects compact candump record exceeding classic CAN payload" {
+    try std.testing.expectError(
+        error.InvalidDataLengthCode,
+        parseLine(
+            "(1604007042.461135) can1 18FEBF0B#001122334455667788",
+        ),
+    );
 }
 
 test "parses eight-byte extended CAN record" {

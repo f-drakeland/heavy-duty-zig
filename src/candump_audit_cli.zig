@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
             io,
             path,
             arena,
-            .limited(4 * 1024 * 1024),
+            .limited(64 * 1024 * 1024),
         );
 
     const audit =
