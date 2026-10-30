@@ -4,7 +4,7 @@ const Io = std.Io;
 const correlation = @import("correlation.zig");
 const can_diagnostic_pipeline = @import("can_diagnostic_pipeline.zig");
 const capture_lineage = @import("capture_lineage.zig");
-const evidence_lineage = @import("evidence_lineage.zig");
+const evidence_composition = @import("evidence_composition.zig");
 const ddec_csv = @import("ddec_csv.zig");
 const j1939 = @import("j1939.zig");
 
@@ -69,10 +69,12 @@ fn inspectSinglePass(
             payload_capacity,
         );
 
-    const EvidenceInventory =
-        correlation.CorrelationEvidenceInventory(
+    const EvidenceRecorder =
+        evidence_composition.Recorder(
             correlation_evidence_capacity,
             payload_capacity,
+            lineage_occurrence_capacity,
+            lineage_contribution_capacity,
         );
 
     const Relationships =
@@ -80,16 +82,13 @@ fn inspectSinglePass(
             relationship_capacity,
         );
 
-    const EvidenceOccurrences =
-        evidence_lineage.CorrelationEvidenceOccurrenceInventory(
-            lineage_occurrence_capacity,
-            lineage_contribution_capacity,
-        );
-
     var pipeline: CanPipeline = .{};
-    var evidence_inventory: EvidenceInventory = .{};
+    var recorder: EvidenceRecorder = .{};
+    const EvidenceInventory = @TypeOf(recorder.evidence_inventory);
     var relationships: Relationships = .{};
-    var evidence_occurrences: EvidenceOccurrences = .{};
+
+    const evidence_inventory = &recorder.evidence_inventory;
+    const evidence_occurrences = &recorder.evidence_occurrences;
 
     var j1939_component_payloads: usize = 0;
     var uds_did_responses: usize = 0;
@@ -190,36 +189,22 @@ fn inspectSinglePass(
                                                     )) orelse
                                                     continue;
 
-                                                const observed =
-                                                    try evidence_inventory.observe(
-                                                        owned,
-                                                    );
-
-                                                if (completed.lineage.len >
-                                                    j1939_transport_lineage_capacity)
-                                                {
-                                                    return error.LineageContributionCapacityExceeded;
-                                                }
-
                                                 var contributions: [j1939_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
                                                     undefined;
 
-                                                for (
-                                                    completed.lineage,
-                                                    0..,
-                                                ) |contribution, index| {
-                                                    contributions[index] = .{
-                                                        .frame_occurrence = contribution.frame_occurrence,
-                                                        .evidence_offset = contribution.message_offset,
-                                                        .byte_length = contribution.byte_length,
-                                                    };
-                                                }
+                                                const recorded =
+                                                    try recorder.record(
+                                                        owned,
+                                                        completed.lineage,
+                                                        .{
+                                                            .offset = 0,
+                                                            .byte_length = component.raw_payload.?.len,
+                                                        },
+                                                        &contributions,
+                                                    );
 
                                                 const occurrence_id =
-                                                    try evidence_occurrences.record(
-                                                        observed.id,
-                                                        contributions[0..completed.lineage.len],
-                                                    );
+                                                    recorded.occurrence_id;
 
                                                 const occurrence =
                                                     evidence_occurrences
@@ -301,78 +286,65 @@ fn inspectSinglePass(
                                     uds_evidence,
                                 );
 
-                            const observed =
-                                try evidence_inventory.observe(
-                                    owned,
-                                );
-
                             var contributions: [isotp_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
                                 undefined;
 
-                            const evidence_span: correlation.PayloadRange =
-                                .{
-                                    .offset = 3,
-                                    .byte_length = uds_evidence
-                                        .data_after_identifier
-                                        .len,
-                                };
-
-                            const projected_contributions =
-                                try evidence_lineage.projectMessageContributions(
+                            const recorded =
+                                try recorder.record(
+                                    owned,
                                     completed.lineage,
-                                    evidence_span,
+                                    .{
+                                        .offset = 3,
+                                        .byte_length = uds_evidence
+                                            .data_after_identifier.len,
+                                    },
                                     &contributions,
                                 );
 
-                            if (projected_contributions.len != 0) {
-                                const occurrence_id =
-                                    try evidence_occurrences.record(
-                                        observed.id,
-                                        projected_contributions,
-                                    );
+                            const occurrence_id =
+                                recorded.occurrence_id;
 
-                                const occurrence =
-                                    evidence_occurrences
-                                        .occurrence(
-                                        occurrence_id,
-                                    ) orelse
-                                    return error.RecordedOccurrenceMissing;
+                            const occurrence =
+                                evidence_occurrences
+                                    .occurrence(
+                                    occurrence_id,
+                                ) orelse
+                                return error.RecordedOccurrenceMissing;
 
-                                if (uds_evidence.data_identifier ==
-                                    0xf157)
-                                {
-                                    std.debug.print(
-                                        "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
-                                        .{
-                                            occurrence.id.index,
-                                            occurrence.value_id.index,
-                                            occurrence.contributions.len,
-                                        },
-                                    );
-                                } else {
-                                    std.debug.print(
-                                        "lineage: UDS DID 0x{X:0>4} occurrence #{} -> evidence #{} contributors={}\n",
-                                        .{
-                                            uds_evidence.data_identifier,
-                                            occurrence.id.index,
-                                            occurrence.value_id.index,
-                                            occurrence.contributions.len,
-                                        },
-                                    );
-                                }
+                            if (uds_evidence.data_identifier ==
+                                0xf157)
+                            {
+                                std.debug.print(
+                                    "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
+                                    .{
+                                        occurrence.id.index,
+                                        occurrence.value_id.index,
+                                        occurrence.contributions.len,
+                                    },
+                                );
+                            } else {
+                                std.debug.print(
+                                    "lineage: UDS DID 0x{X:0>4} occurrence #{} -> evidence #{} contributors={}\n",
+                                    .{
+                                        uds_evidence.data_identifier,
+                                        occurrence.id.index,
+                                        occurrence.value_id.index,
+                                        occurrence.contributions.len,
+                                    },
+                                );
+                            }
 
-                                for (
-                                    occurrence.contributions,
-                                ) |contribution| {
-                                    std.debug.print(
-                                        "  frame occurrence #{} -> evidence offset={} length={}\n",
-                                        .{
-                                            contribution.frame_occurrence.index,
-                                            contribution.evidence_offset,
-                                            contribution.byte_length,
-                                        },
-                                    );
-                                }
+                            for (
+                                occurrence.contributions,
+                            ) |contribution| {
+                                std.debug.print(
+                                    "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                    .{
+                                        contribution.frame_occurrence.index,
+                                        contribution.evidence_offset,
+                                        contribution.byte_length,
+                                    },
+                                );
                             }
                         }
                     },
