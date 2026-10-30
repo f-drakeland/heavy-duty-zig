@@ -2,6 +2,101 @@ const std = @import("std");
 const correlation = @import("correlation.zig");
 const capture_lineage = @import("capture_lineage.zig");
 
+/// Projects all logical-message frame contributions into a selected
+/// diagnostic evidence range.
+///
+/// The caller owns output storage. The returned slice borrows that storage.
+/// Contributions outside the evidence range are excluded. This operation
+/// preserves existing projection semantics; it does not independently
+/// establish full coverage of the selected evidence range.
+pub const ProjectionError = error{
+    LineageContributionCapacityExceeded,
+};
+
+pub fn projectMessageContributions(
+    message_lineage: []const capture_lineage.MessagePayloadContribution,
+    evidence_span: correlation.PayloadRange,
+    output: []capture_lineage.EvidencePayloadContribution,
+) ProjectionError![]const capture_lineage.EvidencePayloadContribution {
+    var needed: usize = 0;
+
+    for (message_lineage) |contribution| {
+        if (correlation.projectPayloadContribution(
+            .{
+                .offset = contribution.message_offset,
+                .byte_length = contribution.byte_length,
+            },
+            evidence_span,
+        ) != null) {
+            needed += 1;
+        }
+    }
+
+    if (needed > output.len) {
+        return error.LineageContributionCapacityExceeded;
+    }
+
+    var count: usize = 0;
+
+    for (message_lineage) |contribution| {
+        const projected = correlation.projectPayloadContribution(
+            .{
+                .offset = contribution.message_offset,
+                .byte_length = contribution.byte_length,
+            },
+            evidence_span,
+        ) orelse continue;
+
+        output[count] = .{
+            .frame_occurrence = contribution.frame_occurrence,
+            .evidence_offset = projected.offset,
+            .byte_length = projected.byte_length,
+        };
+
+        count += 1;
+    }
+
+    return output[0..count];
+}
+
+test "projects multiframe message lineage into UDS evidence bytes" {
+    const input = [_]capture_lineage.MessagePayloadContribution{
+        .{ .frame_occurrence = .{ .index = 100 }, .message_offset = 0, .byte_length = 6 },
+        .{ .frame_occurrence = .{ .index = 101 }, .message_offset = 6, .byte_length = 7 },
+        .{ .frame_occurrence = .{ .index = 102 }, .message_offset = 13, .byte_length = 7 },
+        .{ .frame_occurrence = .{ .index = 103 }, .message_offset = 20, .byte_length = 7 },
+        .{ .frame_occurrence = .{ .index = 104 }, .message_offset = 27, .byte_length = 7 },
+        .{ .frame_occurrence = .{ .index = 105 }, .message_offset = 34, .byte_length = 2 },
+    };
+
+    var output: [6]capture_lineage.EvidencePayloadContribution = undefined;
+
+    const projected = try projectMessageContributions(
+        &input,
+        .{ .offset = 3, .byte_length = 33 },
+        &output,
+    );
+
+    try std.testing.expectEqual(@as(usize, 6), projected.len);
+    try std.testing.expectEqual(@as(usize, 100), projected[0].frame_occurrence.index);
+    try std.testing.expectEqual(@as(usize, 0), projected[0].evidence_offset);
+    try std.testing.expectEqual(@as(usize, 3), projected[0].byte_length);
+    try std.testing.expectEqual(@as(usize, 105), projected[5].frame_occurrence.index);
+    try std.testing.expectEqual(@as(usize, 31), projected[5].evidence_offset);
+    try std.testing.expectEqual(@as(usize, 2), projected[5].byte_length);
+
+    var insufficient: [5]capture_lineage.EvidencePayloadContribution = undefined;
+
+    try std.testing.expectError(
+        error.LineageContributionCapacityExceeded,
+        projectMessageContributions(
+            &input,
+            .{ .offset = 3, .byte_length = 33 },
+            &insufficient,
+        ),
+    );
+}
+
 /// Capture-local identity of one correlation-evidence occurrence.
 ///
 /// Multiple occurrences may reference the same durable EvidenceValueId.

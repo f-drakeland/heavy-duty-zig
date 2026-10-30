@@ -54,33 +54,6 @@ fn isRecoverablePipelineError(
     };
 }
 
-fn appendProjectedEvidenceContribution(
-    storage: []capture_lineage.EvidencePayloadContribution,
-    count: *usize,
-    frame_occurrence: capture_lineage.FrameOccurrenceId,
-    message_contribution: correlation.PayloadRange,
-    evidence_span: correlation.PayloadRange,
-) !void {
-    const projected =
-        correlation.projectPayloadContribution(
-            message_contribution,
-            evidence_span,
-        ) orelse
-        return;
-
-    if (count.* >= storage.len) {
-        return error.LineageContributionCapacityExceeded;
-    }
-
-    storage[count.*] = .{
-        .frame_occurrence = frame_occurrence,
-        .evidence_offset = projected.offset,
-        .byte_length = projected.byte_length,
-    };
-
-    count.* += 1;
-}
-
 fn inspectSinglePass(
     text: []const u8,
 ) !void {
@@ -336,8 +309,6 @@ fn inspectSinglePass(
                             var contributions: [isotp_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
                                 undefined;
 
-                            var contribution_count: usize = 0;
-
                             const evidence_span: correlation.PayloadRange =
                                 .{
                                     .offset = 3,
@@ -346,26 +317,18 @@ fn inspectSinglePass(
                                         .len,
                                 };
 
-                            for (
-                                completed.lineage,
-                            ) |contribution| {
-                                try appendProjectedEvidenceContribution(
-                                    &contributions,
-                                    &contribution_count,
-                                    contribution.frame_occurrence,
-                                    .{
-                                        .offset = contribution.message_offset,
-                                        .byte_length = contribution.byte_length,
-                                    },
+                            const projected_contributions =
+                                try evidence_lineage.projectMessageContributions(
+                                    completed.lineage,
                                     evidence_span,
+                                    &contributions,
                                 );
-                            }
 
-                            if (contribution_count != 0) {
+                            if (projected_contributions.len != 0) {
                                 const occurrence_id =
                                     try evidence_occurrences.record(
                                         observed.id,
-                                        contributions[0..contribution_count],
+                                        projected_contributions,
                                     );
 
                                 const occurrence =
