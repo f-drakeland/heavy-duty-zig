@@ -163,11 +163,11 @@ pub fn CorrelationEvidenceOccurrenceInventory(
             undefined,
         contribution_count: usize = 0,
 
-        pub fn record(
-            self: *Self,
-            value_id: correlation.EvidenceValueId,
+        /// Checks occurrence and contribution bounds without mutation.
+        pub fn checkRecordCapacity(
+            self: *const Self,
             new_contributions: []const capture_lineage.EvidencePayloadContribution,
-        ) CorrelationEvidenceOccurrenceError!CorrelationEvidenceOccurrenceId {
+        ) CorrelationEvidenceOccurrenceError!void {
             if (new_contributions.len == 0) {
                 return error.CorrelationEvidenceOccurrenceRequiresContribution;
             }
@@ -181,6 +181,14 @@ pub fn CorrelationEvidenceOccurrenceInventory(
             {
                 return error.EvidencePayloadContributionCapacityExceeded;
             }
+        }
+
+        pub fn record(
+            self: *Self,
+            value_id: correlation.EvidenceValueId,
+            new_contributions: []const capture_lineage.EvidencePayloadContribution,
+        ) CorrelationEvidenceOccurrenceError!CorrelationEvidenceOccurrenceId {
+            try self.checkRecordCapacity(new_contributions);
 
             const id: CorrelationEvidenceOccurrenceId = .{
                 .index = self.occurrence_count,

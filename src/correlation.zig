@@ -770,6 +770,25 @@ pub fn CorrelationEvidenceInventory(
         slots: [evidence_capacity]Slot = @splat(.{}),
         evidence_count: usize = 0,
 
+        /// Checks whether observing a value can succeed without mutation.
+        /// An existing value remains admissible when storage is full.
+        pub fn checkObserveCapacity(
+            self: *const Self,
+            owned_evidence: Owned,
+        ) CorrelationInventoryError!void {
+            if (self.evidence_count < evidence_capacity) return;
+
+            for (&self.slots) |*slot| {
+                if (slot.occupied and
+                    slot.evidence.eqlExact(&owned_evidence))
+                {
+                    return;
+                }
+            }
+
+            return error.CorrelationEvidenceCapacityExceeded;
+        }
+
         pub fn observe(
             self: *Self,
             owned_evidence: Owned,
