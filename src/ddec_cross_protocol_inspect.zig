@@ -281,72 +281,79 @@ fn inspectSinglePass(
                         if (maybe_evidence) |uds_evidence| {
                             uds_did_responses += 1;
 
-                            const owned =
-                                try CorrelationEvidence
-                                    .fromUdsDataIdentifier(
-                                    uds_evidence,
-                                );
-
-                            var contributions: [isotp_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
-                                undefined;
-
-                            const recorded =
-                                try recorder.record(
-                                    owned,
-                                    completed.message.payload,
-                                    completed.lineage,
-                                    .{
-                                        .offset = 3,
-                                        .byte_length = uds_evidence
-                                            .data_after_identifier.len,
-                                    },
-                                    &contributions,
-                                );
-
-                            const occurrence_id =
-                                recorded.occurrence_id;
-
-                            const occurrence =
-                                evidence_occurrences
-                                    .occurrence(
-                                    occurrence_id,
-                                ) orelse
-                                return error.RecordedOccurrenceMissing;
-
-                            if (uds_evidence.data_identifier ==
-                                0xf157)
-                            {
-                                std.debug.print(
-                                    "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
-                                    .{
-                                        occurrence.id.index,
-                                        occurrence.value_id.index,
-                                        occurrence.contributions.len,
-                                    },
-                                );
+                            // A valid DID response may contain no data.
+                            // It is an observation, but supplies no bytes
+                            // that can be preserved as correlation evidence.
+                            if (uds_evidence.data_after_identifier.len == 0) {
+                                uds_evidence_rejected += 1;
                             } else {
-                                std.debug.print(
-                                    "lineage: UDS DID 0x{X:0>4} occurrence #{} -> evidence #{} contributors={}\n",
-                                    .{
-                                        uds_evidence.data_identifier,
-                                        occurrence.id.index,
-                                        occurrence.value_id.index,
-                                        occurrence.contributions.len,
-                                    },
-                                );
-                            }
+                                const owned =
+                                    try CorrelationEvidence
+                                        .fromUdsDataIdentifier(
+                                        uds_evidence,
+                                    );
 
-                            for (
-                                occurrence.contributions,
-                            ) |contribution| {
-                                std.debug.print(
-                                    "  frame occurrence #{} -> evidence offset={} length={}\n",
-                                    .{
-                                        contribution.frame_occurrence.index,
-                                        contribution.evidence_offset,
-                                        contribution.byte_length,
-                                    },
-                                );
+                                var contributions: [isotp_transport_lineage_capacity]capture_lineage.EvidencePayloadContribution =
+                                    undefined;
+
+                                const recorded =
+                                    try recorder.record(
+                                        owned,
+                                        completed.message.payload,
+                                        completed.lineage,
+                                        .{
+                                            .offset = 3,
+                                            .byte_length = uds_evidence
+                                                .data_after_identifier.len,
+                                        },
+                                        &contributions,
+                                    );
+
+                                const occurrence_id =
+                                    recorded.occurrence_id;
+
+                                const occurrence =
+                                    evidence_occurrences
+                                        .occurrence(
+                                        occurrence_id,
+                                    ) orelse
+                                    return error.RecordedOccurrenceMissing;
+
+                                if (uds_evidence.data_identifier ==
+                                    0xf157)
+                                {
+                                    std.debug.print(
+                                        "lineage: UDS F157 occurrence #{} -> evidence #{} contributors={}\n",
+                                        .{
+                                            occurrence.id.index,
+                                            occurrence.value_id.index,
+                                            occurrence.contributions.len,
+                                        },
+                                    );
+                                } else {
+                                    std.debug.print(
+                                        "lineage: UDS DID 0x{X:0>4} occurrence #{} -> evidence #{} contributors={}\n",
+                                        .{
+                                            uds_evidence.data_identifier,
+                                            occurrence.id.index,
+                                            occurrence.value_id.index,
+                                            occurrence.contributions.len,
+                                        },
+                                    );
+                                }
+
+                                for (
+                                    occurrence.contributions,
+                                ) |contribution| {
+                                    std.debug.print(
+                                        "  frame occurrence #{} -> evidence offset={} length={}\n",
+                                        .{
+                                            contribution.frame_occurrence.index,
+                                            contribution.evidence_offset,
+                                            contribution.byte_length,
+                                        },
+                                    );
+                                }
                             }
                         }
                     },
@@ -598,4 +605,11 @@ pub fn main(
         );
 
     try inspectSinglePass(text);
+}
+
+test "empty UDS DID response does not abort capture inspection" {
+    const synthetic_capture =
+        "1.000000,1,On/Off,CAN (4a8),RX ch:1,Dlc:8,idx:,18daf100,data:,03,62,f1,57,00,00,00,00,";
+
+    try inspectSinglePass(synthetic_capture);
 }

@@ -20,8 +20,19 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
 
+    const inspector_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ddec_cross_protocol_inspect.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_inspector_tests = b.addRunArtifact(inspector_tests);
+
     const test_step = b.step("test", "Run Heavy Duty Zig tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_inspector_tests.step);
 
     const demo = b.addExecutable(.{
         .name = "ddec_cross_protocol_inspect",
@@ -98,5 +109,6 @@ pub fn build(b: *std.Build) void {
 
     check_step.dependOn(&fmt.step);
     check_step.dependOn(&run_tests.step);
+    check_step.dependOn(&run_inspector_tests.step);
     check_step.dependOn(&verify_demo.step);
 }
