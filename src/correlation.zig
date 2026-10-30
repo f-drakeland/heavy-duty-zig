@@ -644,6 +644,14 @@ pub fn OwnedCorrelationEvidence(
             };
         }
 
+        /// Exact bytes represented by this durable correlation value.
+        pub fn correlationBytes(self: *const Self) []const u8 {
+            return switch (self.*) {
+                .j1939_component_identification_payload => |*value| value.payload.bytes(),
+                .uds_data_identifier_response => |*value| value.data_after_identifier.bytes(),
+            };
+        }
+
         pub fn eqlExact(
             self: *const Self,
             other: *const Self,

@@ -195,6 +195,7 @@ fn inspectSinglePass(
                                                 const recorded =
                                                     try recorder.record(
                                                         owned,
+                                                        completed.message.data(),
                                                         completed.lineage,
                                                         .{
                                                             .offset = 0,
@@ -292,6 +293,7 @@ fn inspectSinglePass(
                             const recorded =
                                 try recorder.record(
                                     owned,
+                                    completed.message.payload,
                                     completed.lineage,
                                     .{
                                         .offset = 3,

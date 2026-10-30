@@ -22,7 +22,7 @@ pub fn Recorder(
             evidence_lineage.ProjectionError ||
             evidence_lineage.CorrelationEvidenceOccurrenceError ||
             correlation.CorrelationInventoryError ||
-            error{IncompleteEvidenceCoverage};
+            error{ IncompleteEvidenceCoverage, EvidencePayloadMismatch };
 
         pub const RecordResult = struct {
             evidence: correlation.CorrelationEvidenceObserveResult,
@@ -49,10 +49,26 @@ pub fn Recorder(
         pub fn record(
             self: *Self,
             owned: Owned,
+            message_payload: []const u8,
             message_lineage: []const capture_lineage.MessagePayloadContribution,
             evidence_span: correlation.PayloadRange,
             scratch: []capture_lineage.EvidencePayloadContribution,
         ) Error!RecordResult {
+            // Validate the evidence selection against actual message bytes
+            // before projecting lineage or mutating either inventory.
+            if (evidence_span.offset > message_payload.len or
+                evidence_span.byte_length >
+                    message_payload.len - evidence_span.offset)
+            {
+                return error.EvidencePayloadMismatch;
+            }
+
+            const selected = message_payload[evidence_span.offset .. evidence_span.offset + evidence_span.byte_length];
+
+            if (!std.mem.eql(u8, owned.correlationBytes(), selected)) {
+                return error.EvidencePayloadMismatch;
+            }
+
             const projected =
                 try evidence_lineage.projectMessageContributions(
                     message_lineage,
@@ -141,6 +157,7 @@ test "repeated evidence retains distinct occurrences without partial writes" {
 
     const first = try recorder.record(
         owned,
+        "ABC",
         &first_lineage,
         span,
         &scratch,
@@ -148,6 +165,7 @@ test "repeated evidence retains distinct occurrences without partial writes" {
 
     const second = try recorder.record(
         owned,
+        "ABC",
         &second_lineage,
         span,
         &scratch,
@@ -184,7 +202,7 @@ test "repeated evidence retains distinct occurrences without partial writes" {
 
     try std.testing.expectError(
         error.CorrelationEvidenceOccurrenceCapacityExceeded,
-        recorder.record(owned, &first_lineage, span, &scratch),
+        recorder.record(owned, "ABC", &first_lineage, span, &scratch),
     );
 
     try std.testing.expectEqual(
@@ -249,7 +267,7 @@ test "invalid coverage and exhausted value storage do not mutate inventories" {
 
     try std.testing.expectError(
         error.IncompleteEvidenceCoverage,
-        recorder.record(first, &gap, span, &scratch),
+        recorder.record(first, "ABC", &gap, span, &scratch),
     );
 
     try std.testing.expectEqual(
@@ -257,11 +275,11 @@ test "invalid coverage and exhausted value storage do not mutate inventories" {
         recorder.evidence_inventory.count(),
     );
 
-    _ = try recorder.record(first, &full, span, &scratch);
+    _ = try recorder.record(first, "ABC", &full, span, &scratch);
 
     try std.testing.expectError(
         error.CorrelationEvidenceCapacityExceeded,
-        recorder.record(different, &full, span, &scratch),
+        recorder.record(different, "XYZ", &full, span, &scratch),
     );
 
     try std.testing.expectEqual(
@@ -270,6 +288,97 @@ test "invalid coverage and exhausted value storage do not mutate inventories" {
     );
     try std.testing.expectEqual(
         @as(usize, 1),
+        recorder.evidence_occurrences.count(),
+    );
+}
+
+test "forged evidence bytes and overlapping lineage cannot be recorded" {
+    const TestRecorder = Recorder(2, 8, 3, 4);
+    const Evidence = correlation.OwnedCorrelationEvidence(8);
+
+    var recorder: TestRecorder = .{};
+
+    const owned = (try Evidence.fromJ1939ComponentIdentification(.{
+        .source_address = 0,
+        .delivery = .single_frame,
+        .make = "",
+        .model = "",
+        .serial_number = "",
+        .unit_number = "",
+        .raw_payload = "ABC",
+    })).?;
+
+    const full = [_]capture_lineage.MessagePayloadContribution{
+        .{
+            .frame_occurrence = .{ .index = 10 },
+            .message_offset = 0,
+            .byte_length = 3,
+        },
+    };
+
+    const overlapping = [_]capture_lineage.MessagePayloadContribution{
+        .{
+            .frame_occurrence = .{ .index = 11 },
+            .message_offset = 0,
+            .byte_length = 2,
+        },
+        .{
+            .frame_occurrence = .{ .index = 12 },
+            .message_offset = 1,
+            .byte_length = 2,
+        },
+    };
+
+    var scratch: [4]capture_lineage.EvidencePayloadContribution =
+        undefined;
+
+    const span: correlation.PayloadRange =
+        .{ .offset = 0, .byte_length = 3 };
+
+    try std.testing.expectError(
+        error.EvidencePayloadMismatch,
+        recorder.record(owned, "ABD", &full, span, &scratch),
+    );
+
+    try std.testing.expectError(
+        error.EvidencePayloadMismatch,
+        recorder.record(
+            owned,
+            "ABC",
+            &full,
+            .{ .offset = 1, .byte_length = 3 },
+            &scratch,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.EvidencePayloadMismatch,
+        recorder.record(
+            owned,
+            "AB",
+            &full,
+            .{ .offset = 0, .byte_length = 2 },
+            &scratch,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.IncompleteEvidenceCoverage,
+        recorder.record(
+            owned,
+            "ABC",
+            &overlapping,
+            span,
+            &scratch,
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        recorder.evidence_inventory.count(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
         recorder.evidence_occurrences.count(),
     );
 }
